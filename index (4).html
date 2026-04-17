@@ -1,0 +1,2700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Net Worth Calculator</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/prop-types/prop-types.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; padding: 0; background: #060810; font-family: Inter, sans-serif; }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0d1117; }
+    ::-webkit-scrollbar-thumb { background: #1c1f2b; border-radius: 3px; }
+    #error-box {
+      display: none; position: fixed; top: 0; left: 0; right: 0;
+      background: #1a0000; color: #f87171; font-family: monospace;
+      font-size: 13px; padding: 20px; z-index: 9999;
+      white-space: pre-wrap; max-height: 50vh; overflow: auto;
+      border-bottom: 2px solid #f87171;
+    }
+    #loading {
+      color: #4b5563; font-family: monospace; font-size: 14px;
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    }
+  </style>
+</head>
+<body>
+  <div id="error-box"></div>
+  <div id="loading">Loading calculator... (this may take a few seconds)</div>
+  <div id="root"></div>
+  <script>
+    window.onerror = function(msg, src, line, col, err) {
+      var box = document.getElementById("error-box");
+      box.style.display = "block";
+      box.textContent = "ERROR: " + msg + "\nLine: " + line + "\n" + (err && err.stack ? err.stack : "");
+      document.getElementById("loading").style.display = "none";
+    };
+  </script>
+  <script type="text/babel" data-presets="react">
+    const { useState, useMemo, useCallback, useRef, useEffect } = React;
+    const _rc = window.Recharts || window.recharts || {};
+    const {
+      LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+      Legend, ResponsiveContainer, ReferenceLine, Area, AreaChart,
+      BarChart, Bar, ComposedChart
+    } = _rc;
+
+
+// ── Tax helpers ───────────────────────────────────────────────────────────────
+const FED_BRACKETS_SINGLE_2025 = [
+  { min: 0,       max: 11925,    rate: 0.10 },
+  { min: 11925,   max: 48475,    rate: 0.12 },
+  { min: 48475,   max: 103350,   rate: 0.22 },
+  { min: 103350,  max: 197300,   rate: 0.24 },
+  { min: 197300,  max: 250525,   rate: 0.32 },
+  { min: 250525,  max: 626350,   rate: 0.35 },
+  { min: 626350,  max: Infinity, rate: 0.37 },
+];
+const STANDARD_DEDUCTION_SINGLE = 15000;
+const STANDARD_DEDUCTION_MFJ    = 30000;
+
+const FED_BRACKETS_MFJ_2025 = [
+  { min: 0,        max: 23850,    rate: 0.10 },
+  { min: 23850,    max: 96950,    rate: 0.12 },
+  { min: 96950,    max: 206700,   rate: 0.22 },
+  { min: 206700,   max: 394600,   rate: 0.24 },
+  { min: 394600,   max: 501050,   rate: 0.32 },
+  { min: 501050,   max: 751600,   rate: 0.35 },
+  { min: 751600,   max: Infinity, rate: 0.37 },
+];
+
+const STATE_TAX_BY_ZIP = (zip) => {
+  const p = parseInt(zip?.slice(0, 3) || "0", 10);
+  if (p >= 10  && p <= 149) return 0.0685;
+  if (p >= 900 && p <= 961) return 0.0813;
+  if (p >= 600 && p <= 629) return 0.0495;
+  if (p >= 770 && p <= 779) return 0.0000;
+  if (p >= 320 && p <= 349) return 0.0000;
+  if (p >= 980 && p <= 994) return 0.0000;
+  if (p >= 970 && p <= 979) return 0.0875;
+  if (p >= 300 && p <= 319) return 0.0575;
+  if (p >= 150 && p <= 196) return 0.0307;
+  if (p >= 200 && p <= 212) return 0.0575;
+  if (p >= 430 && p <= 459) return 0.0399;
+  if (p >= 480 && p <= 499) return 0.0425;
+  if (p >= 550 && p <= 567) return 0.0985;
+  if (p >= 700 && p <= 729) return 0.0600;
+  if (p >= 850 && p <= 865) return 0.0259;
+  if (p >= 800 && p <= 816) return 0.0450;
+  if (p >= 890 && p <= 898) return 0.0000;
+  return 0.05;
+};
+
+// Effective property tax rate by ZIP (annual % of property value)
+// Source: Tax Foundation / Census Bureau state averages, adjusted for metro vs rural
+const PROPERTY_TAX_BY_ZIP = (zip) => {
+  const p = parseInt(zip?.slice(0, 3) || "0", 10);
+  // Very high: NJ, IL, CT, NH, WI, TX (no income tax, high property tax)
+  if (p >= 70  && p <= 89)  return 0.0220; // New Jersey
+  if (p >= 600 && p <= 629) return 0.0205; // Illinois
+  if (p >= 60  && p <= 69)  return 0.0190; // Connecticut
+  if (p >= 30  && p <= 38)  return 0.0180; // New Hampshire
+  if (p >= 530 && p <= 549) return 0.0175; // Wisconsin
+  if (p >= 750 && p <= 799) return 0.0165; // Texas
+  if (p >= 770 && p <= 779) return 0.0165; // Houston
+  // High: NY, PA, OH, MI, IA, NE, VT, RI
+  if (p >= 10  && p <= 149) return 0.0158; // New York metro
+  if (p >= 100 && p <= 102) return 0.0120; // Manhattan (assessed lower)
+  if (p >= 150 && p <= 196) return 0.0150; // Pennsylvania
+  if (p >= 430 && p <= 459) return 0.0148; // Ohio
+  if (p >= 480 && p <= 499) return 0.0142; // Michigan
+  if (p >= 500 && p <= 528) return 0.0145; // Iowa
+  if (p >= 680 && p <= 693) return 0.0148; // Nebraska
+  if (p >= 50  && p <= 59)  return 0.0168; // Vermont
+  if (p >= 28  && p <= 29)  return 0.0145; // Rhode Island
+  // Moderate: CA, WA, OR, CO, MN, MO, MD, VA, NC, GA
+  if (p >= 900 && p <= 961) return 0.0073; // California (Prop 13 limited)
+  if (p >= 980 && p <= 994) return 0.0092; // Washington
+  if (p >= 970 && p <= 979) return 0.0090; // Oregon
+  if (p >= 800 && p <= 816) return 0.0049; // Colorado
+  if (p >= 550 && p <= 567) return 0.0108; // Minnesota
+  if (p >= 630 && p <= 658) return 0.0096; // Missouri
+  if (p >= 200 && p <= 212) return 0.0098; // Maryland / DC
+  if (p >= 220 && p <= 246) return 0.0082; // Virginia
+  if (p >= 270 && p <= 289) return 0.0083; // North Carolina
+  if (p >= 300 && p <= 319) return 0.0091; // Georgia
+  if (p >= 850 && p <= 865) return 0.0062; // Arizona
+  if (p >= 890 && p <= 898) return 0.0053; // Nevada
+  if (p >= 787 && p <= 788) return 0.0165; // Austin TX (higher effective)
+  // Low: HI, AL, SC, DC, LA, WV, DE
+  if (p >= 967 && p <= 969) return 0.0028; // Hawaii
+  if (p >= 350 && p <= 369) return 0.0039; // Alabama
+  if (p >= 290 && p <= 299) return 0.0054; // South Carolina
+  if (p >= 700 && p <= 729) return 0.0055; // Louisiana
+  if (p >= 240 && p <= 268) return 0.0058; // West Virginia / Virginia rural
+  if (p >= 197 && p <= 199) return 0.0054; // Delaware
+  if (p >= 386 && p <= 397) return 0.0052; // Mississippi
+  if (p >= 370 && p <= 385) return 0.0067; // Tennessee
+  if (p >= 716 && p <= 729) return 0.0062; // Arkansas
+  return 0.0100; // national average baseline
+};
+
+function calcFederalTax(income, inflFactor = 1) {
+  const deduction = STANDARD_DEDUCTION_SINGLE * inflFactor;
+  const taxable = Math.max(0, income - deduction);
+  let tax = 0;
+  for (const b of FED_BRACKETS_SINGLE_2025) {
+    const bMin = b.min * inflFactor;
+    const bMax = b.max === Infinity ? Infinity : b.max * inflFactor;
+    if (taxable <= bMin) break;
+    tax += (Math.min(taxable, bMax) - bMin) * b.rate;
+  }
+  return tax;
+}
+
+function calcTotalTax(income, zip, inflFactor = 1) {
+  const federal = calcFederalTax(income, inflFactor);
+  const ssWageCap = 176100 * inflFactor;
+  const fica = Math.min(income, ssWageCap) * 0.062 + income * 0.0145;
+  const deduction = STANDARD_DEDUCTION_SINGLE * inflFactor;
+  const state = Math.max(0, income - deduction) * STATE_TAX_BY_ZIP(zip);
+  return federal + fica + state;
+}
+
+// ── Cost-of-living multiplier by ZIP ─────────────────────────────────────────
+// Base costs calibrated to national mid-cost average (multiplier = 1.0).
+// Derived from MIT Living Wage calculator, USDA child expenditure data, regional COL indices.
+const COL_MULTIPLIER_BY_ZIP = (zip) => {
+  const p = parseInt(zip?.slice(0, 3) || "0", 10);
+  // Very high cost
+  if (p >= 100 && p <= 102) return 2.10; // Manhattan
+  if (p >= 10  && p <= 119) return 1.85; // NYC metro
+  if (p >= 940 && p <= 941) return 2.00; // San Francisco
+  if (p >= 943 && p <= 944) return 1.90; // Silicon Valley
+  if (p >= 900 && p <= 902) return 1.75; // LA core
+  if (p >= 903 && p <= 912) return 1.55; // LA metro / OC
+  if (p >= 980 && p <= 981) return 1.80; // Seattle
+  if (p >= 200 && p <= 202) return 1.85; // DC
+  if (p >= 20  && p <= 24)  return 1.70; // Boston
+  if (p >= 941 && p <= 942) return 1.65; // East Bay
+  // High cost
+  if (p >= 606 && p <= 607) return 1.45; // Chicago core
+  if (p >= 600 && p <= 629) return 1.30; // Chicago metro
+  if (p >= 331 && p <= 334) return 1.40; // Miami
+  if (p >= 800 && p <= 802) return 1.40; // Denver
+  if (p >= 787 && p <= 788) return 1.35; // Austin
+  if (p >= 970 && p <= 972) return 1.40; // Portland OR
+  if (p >= 919 && p <= 922) return 1.50; // San Diego
+  if (p >= 150 && p <= 152) return 1.20; // Philadelphia
+  if (p >= 770 && p <= 772) return 1.25; // Houston
+  if (p >= 750 && p <= 752) return 1.20; // Dallas
+  if (p >= 303 && p <= 304) return 1.25; // Atlanta
+  if (p >= 850 && p <= 853) return 1.20; // Phoenix
+  if (p >= 890 && p <= 891) return 1.30; // Las Vegas
+  // Low cost: rural South, Midwest, Appalachia
+  if (p >= 350 && p <= 369) return 0.82; // Alabama
+  if (p >= 386 && p <= 397) return 0.80; // Mississippi
+  if (p >= 716 && p <= 729) return 0.83; // Arkansas / rural Louisiana
+  if (p >= 570 && p <= 577) return 0.85; // South Dakota
+  if (p >= 580 && p <= 588) return 0.85; // North Dakota
+  if (p >= 240 && p <= 246) return 0.83; // West Virginia
+  if (p >= 400 && p <= 427) return 0.88; // Kentucky
+  if (p >= 370 && p <= 385) return 0.87; // Tennessee (non-Nashville)
+  if (p >= 460 && p <= 479) return 0.88; // Indiana
+  if (p >= 500 && p <= 528) return 0.90; // Iowa
+  return 1.0; // national average baseline
+};
+
+
+// Median 1BR rent baseline by ZIP (today's dollars, national median ~$1,500)
+const MEDIAN_RENT_BY_ZIP = (zip) => {
+  return Math.round(1500 * COL_MULTIPLIER_BY_ZIP(zip));
+};
+
+// Base costs are national mid-cost baselines; scaled by COL factor for locality
+function childCostPerMonth(childAgeYears, colMultiplier = 1.0) {
+  if (childAgeYears < 0)  return 0;
+  if (childAgeYears < 1)  return Math.round(2200 * colMultiplier);
+  if (childAgeYears < 5)  return Math.round(1800 * colMultiplier);
+  if (childAgeYears < 13) return Math.round(1100 * colMultiplier);
+  if (childAgeYears < 18) return Math.round(1300 * colMultiplier);
+  return 0;
+}
+
+// Custom phase lookup: phases = [{years, amount}, ...] in today's dollars
+// Returns 0 once all phases are exhausted
+function childCostCustom(childAgeYears, phases) {
+  if (childAgeYears < 0) return 0;
+  let cursor = 0;
+  for (const phase of phases) {
+    if (childAgeYears < cursor + phase.years) return phase.amount;
+    cursor += phase.years;
+  }
+  return 0;
+}
+
+function calcFederalTaxMFJ(combinedIncome, inflFactor = 1) {
+  const deduction = STANDARD_DEDUCTION_MFJ * inflFactor;
+  const taxable = Math.max(0, combinedIncome - deduction);
+  let tax = 0;
+  for (const b of FED_BRACKETS_MFJ_2025) {
+    const bMin = b.min * inflFactor;
+    const bMax = b.max === Infinity ? Infinity : b.max * inflFactor;
+    if (taxable <= bMin) break;
+    tax += (Math.min(taxable, bMax) - bMin) * b.rate;
+  }
+  return tax;
+}
+
+function calcTotalTaxMFJ(income1, income2, zip, inflFactor = 1) {
+  const combined = income1 + income2;
+  const federal = calcFederalTaxMFJ(combined, inflFactor);
+  // FICA computed individually (SS cap applies per person)
+  const ssWageCap = 176100 * inflFactor;
+  const fica1 = Math.min(income1, ssWageCap) * 0.062 + income1 * 0.0145;
+  const fica2 = Math.min(income2, ssWageCap) * 0.062 + income2 * 0.0145;
+  const deduction = STANDARD_DEDUCTION_MFJ * inflFactor;
+  const state = Math.max(0, combined - deduction) * STATE_TAX_BY_ZIP(zip);
+  return federal + fica1 + fica2 + state;
+}
+
+// ── Inflation presets ─────────────────────────────────────────────────────────
+const INFLATION_PRESETS = {
+  conservative: { label: "Conservative", pct: 2.0, color: "#34d399", desc: "Fed target / low-inflation era" },
+  historical:   { label: "Historical Avg", pct: 3.1, color: "#fbbf24", desc: "US CPI avg since 1926" },
+  optimistic:   { label: "Elevated",       pct: 5.0, color: "#f87171", desc: "1970s-style / persistent inflation" },
+};
+
+// ── Projection engine ─────────────────────────────────────────────────────────
+function runProjection(params) {
+  const {
+    currentNetWorth, currentSalary,
+    salaryGrowthMode, salaryGrowthPct, salarySteps,
+    monthlyRent, rentGrowthMode, rentGrowthPct, rentSteps,
+    monthlyOtherExpenses, otherGrowthMode, otherGrowthPct, otherSteps,
+    zip, zipMoves,
+    investmentReturnPct, inflationPct,
+    kids, projectionYears,
+    currentAge: currentAgeParam,
+    partnerAge: partnerAgeParam,
+    partner,
+    home,
+    retirement,
+    loans,
+    uninvested,
+    ss,
+    annualReturns,   // optional: array of per-year nominal return % overrides
+    annualInflations, // optional: array of per-year inflation % overrides
+  } = params;
+
+  // nominalMonthlyReturn is computed per-year when annualReturns array is provided
+  const baseMonthlyReturn = Math.pow(1 + investmentReturnPct / 100, 1 / 12) - 1;
+  // Adjust starting NW: if loans included in NW, subtract them from the entered NW
+  // (user enters non-loan NW separately, loans are tracked as a liability)
+  const loanLiability = loans?.enabled ? (loans?.amount || 0) : 0;
+  const partnerLoanLiability = loans?.partnerEnabled ? (loans?.partnerAmount || 0) : 0;
+  let netWorthNominal = currentNetWorth - loanLiability;
+  let partnerNWAdded = false;
+  let partnerJoined = false;
+
+  // Home purchase state
+  let homeActive = false;
+  let propertyValue = 0;
+  let mortgageBalance = 0;
+  let monthlyMortgagePayment = 0;
+  if (home?.enabled) {
+    const purchasePrice = home.purchasePrice || 0;
+    const downFrac = (home.downPct || 20) / 100;
+    const principal = purchasePrice * (1 - downFrac);
+    const monthlyRate = (home.interestRate || 6) / 100 / 12;
+    const n = (home.termYears || 30) * 12;
+    monthlyMortgagePayment = monthlyRate === 0 ? principal / n
+      : principal * monthlyRate * Math.pow(1 + monthlyRate, n) / (Math.pow(1 + monthlyRate, n) - 1);
+  }
+  // Student loan balances (tracked separately from liquid NW)
+  let loanBalance = (loans?.enabled && loans?.amount > 0) ? (loans.amount) : 0;
+  let partnerLoanBalance = (loans?.partnerEnabled && loans?.partnerAmount > 0) ? (loans.partnerAmount) : 0;
+
+  let salary = currentSalary;
+  // Partner values stored in today's dollars; inflated to nominal on join year
+  let partnerSalary = 0;
+  let partnerRent   = 0;
+  let partnerOther  = 0;
+  let rent = monthlyRent;
+  let other = monthlyOtherExpenses;
+  const data = [];
+  let inflationCumulative = 1.0; // tracks actual cumulative inflation for MC paths
+
+  // Sort moves chronologically
+  const sortedMoves = [...(zipMoves || [])].sort((a, b) => a.year - b.year);
+  let activeZip = zip;
+  let prevColMultiplier = COL_MULTIPLIER_BY_ZIP(zip);
+
+  for (let year = 0; year <= projectionYears; year++) {
+    // Use actual cumulative inflation for path-dependent MC, else analytical
+    const yearInflationRate = (annualInflations && annualInflations[year] != null && year > 0)
+      ? annualInflations[year] : inflationPct;
+    if (year > 0) inflationCumulative *= (1 + yearInflationRate / 100);
+    const inflationFactor = annualInflations ? inflationCumulative : Math.pow(1 + inflationPct / 100, year);
+    // Activate partner finances at marriageYear — inflate their values to nominal at that year
+    const partnerActive = partner?.enabled && year >= (partner.marriageYear ?? 0);
+    if (partner?.enabled && !partnerJoined && year >= (partner.marriageYear ?? 0)) {
+      partnerSalary = (partner.salary || 0) * inflationFactor;
+      partnerRent   = (partner.rent   || 0) * inflationFactor;
+      partnerOther  = (partner.otherExp || 0) * inflationFactor;
+      partnerJoined = true;
+    }
+    if (partner?.enabled && !partnerNWAdded && year >= (partner.marriageYear ?? 0)) {
+      netWorthNominal += (partner.netWorth || 0) - partnerLoanLiability;
+      partnerNWAdded = true;
+    }
+    const deflator = 1 / inflationFactor;
+
+    // Apply ZIP move: update tax jurisdiction, re-index rent to new market
+    const moveThisYear = sortedMoves.find(m => m.year === year);
+    if (moveThisYear && moveThisYear.zip.length >= 5) {
+      const newColMultiplier = COL_MULTIPLIER_BY_ZIP(moveThisYear.zip);
+      if (prevColMultiplier > 0 && !homeActive) rent = rent * (newColMultiplier / prevColMultiplier);
+      prevColMultiplier = newColMultiplier;
+      activeZip = moveThisYear.zip;
+    }
+
+    // Home purchase: deduct down payment from liquid NW, track mortgage + property
+    if (home?.enabled && !homeActive && year === (home.purchaseYear ?? 0)) {
+      const purchasePrice = home.purchasePrice || 0;
+      const downAmt = purchasePrice * (home.downPct || 20) / 100;
+      const giftAmt = home.familyGiftEnabled ? Math.min(home.familyGiftAmount || 0, downAmt) : 0;
+      netWorthNominal -= (downAmt - giftAmt); // only out-of-pocket portion leaves liquid NW
+      propertyValue = purchasePrice; // purchase at today's entered price
+      mortgageBalance = purchasePrice * (1 - (home.downPct || 20) / 100);
+      rent = 0; // rent replaced by mortgage payment
+      homeActive = true;
+    }
+    // Appreciate property and amortize mortgage each year (not in purchase year)
+    if (homeActive && year > (home.purchaseYear ?? 0)) {
+      propertyValue *= (1 + (home.appreciationPct || inflationPct) / 100);
+      // Amortize 12 months of mortgage payments
+      const monthlyRate = (home.interestRate || 6) / 100 / 12;
+      for (let m = 0; m < 12; m++) {
+        const interestPmt = mortgageBalance * monthlyRate;
+        const principalPmt = Math.max(0, monthlyMortgagePayment - interestPmt);
+        mortgageBalance = Math.max(0, mortgageBalance - principalPmt);
+      }
+    }
+
+    if (year > 0) {
+      // Salary (COLA + real raise)
+      if (salaryGrowthMode === "percentage") {
+        salary = salary * (1 + salaryGrowthPct / 100 + inflationPct / 100);
+      } else {
+        const step = salarySteps.find(s => s.year === year);
+        if (step) salary = step.salary * Math.pow(1 + inflationPct / 100, year);
+        else salary = salary * (1 + inflationPct / 100);
+      }
+      // Partner salary: mode-aware, same logic as primary
+      if (partnerActive) {
+        if ((partner.salaryMode || "percentage") === "percentage") {
+          partnerSalary = partnerSalary * (1 + (partner.salaryGrowthPct || 0) / 100 + inflationPct / 100);
+        } else {
+          const step = (partner.salarySteps || []).find(s => s.year === year);
+          if (step) partnerSalary = step.salary * Math.pow(1 + inflationPct / 100, year);
+          else partnerSalary = partnerSalary * (1 + inflationPct / 100);
+        }
+        if ((partner.rentMode || "percentage") === "percentage") {
+          partnerRent = partnerRent * (1 + (partner.rentGrowthPct || 0) / 100 + inflationPct / 100);
+        } else {
+          const step = (partner.rentSteps || []).find(s => s.year === year);
+          if (step) partnerRent = step.amount * Math.pow(1 + inflationPct / 100, year);
+          else partnerRent = partnerRent * (1 + inflationPct / 100);
+        }
+        if ((partner.otherMode || "percentage") === "percentage") {
+          partnerOther = partnerOther * (1 + (partner.otherGrowthPct || 0) / 100 + inflationPct / 100);
+        } else {
+          const step = (partner.otherSteps || []).find(s => s.year === year);
+          if (step) partnerOther = step.amount * Math.pow(1 + inflationPct / 100, year);
+          else partnerOther = partnerOther * (1 + inflationPct / 100);
+        }
+      }
+      // Rent: always inflates at CPI (suppressed once home is purchased)
+      if (!homeActive) {
+        if (rentGrowthMode === "percentage") {
+          rent = rent * (1 + rentGrowthPct / 100 + inflationPct / 100);
+        } else {
+          const step = rentSteps.find(s => s.year === year);
+          if (step) rent = step.amount * Math.pow(1 + inflationPct / 100, year);
+          else rent = rent * (1 + inflationPct / 100);
+        }
+      }
+      // Other expenses: same logic
+      if (otherGrowthMode === "percentage") {
+        other = other * (1 + otherGrowthPct / 100 + inflationPct / 100);
+      } else {
+        const step = otherSteps.find(s => s.year === year);
+        if (step) other = step.amount * Math.pow(1 + inflationPct / 100, year);
+        else other = other * (1 + inflationPct / 100);
+      }
+    }
+
+    // Retirement: zero out salary at retirement year, add pension
+    // Social Security income
+    let ssIncome = 0;
+    if (ss?.enabled) {
+      const FRA = 67;
+      // Benefit adjustment factor based on claim age
+      const ssBenefitFactor = (claimAge) => {
+        const monthsDiff = (claimAge - FRA) * 12;
+        if (monthsDiff >= 0) return 1 + monthsDiff * 0.08 / 12; // +8%/yr delayed
+        if (monthsDiff >= -36) return 1 + monthsDiff * (5/9) / 100;
+        return 1 + (-36) * (5/9) / 100 + (monthsDiff + 36) * (5/12) / 100;
+      };
+      const currentAge = currentAgeParam || 35;
+      const ssClaimYear = Math.max(0, (ss.claimAge || 67) - currentAge);
+      if (ss.mySSEnabled !== false && year >= ssClaimYear) {
+        const factor = ssBenefitFactor(ss.claimAge || 67);
+        ssIncome += (ss.calculatedBenefit || 0) * 12 * factor * inflationFactor;
+      }
+      if (partnerActive && partner?.enabled && ss.partnerSSEnabled) {
+        const partnerAgeVal = partnerAgeParam || 35;
+        const partnerClaimYear = Math.max(0, (ss.partnerClaimAge || 67) - partnerAgeVal);
+        if (year >= partnerClaimYear) {
+          const factor = ssBenefitFactor(ss.partnerClaimAge || 67);
+          ssIncome += (ss.partnerCalculatedBenefit || 0) * 12 * factor * inflationFactor;
+        }
+      }
+    }
+
+    let pensionIncome = 0;
+    if (retirement?.enabled) {
+      const retireYear = (retirement.retireAge || 65) - (currentAgeParam || 35);
+      if (year >= retireYear) {
+        salary = 0;
+      }
+      // Pension starts at pensionStartAge, independent of retirement age
+      if (retirement.pensionEnabled && retirement.myPensionEnabled !== false) {
+        const pensionYear = (retirement.pensionStartAge || retirement.retireAge || 65) - (currentAgeParam || 35);
+        if (year >= pensionYear) {
+          pensionIncome = (retirement.pensionAmount || 0) * inflationFactor;
+        }
+      }
+      if (partnerActive) {
+        const partnerRetireYear = (retirement.partnerRetireAge || 65) - (partnerAgeParam || 35);
+        if (year >= partnerRetireYear) {
+          partnerSalary = 0;
+        }
+        if (retirement.partnerPensionEnabled) {
+          const partnerPensionYear = (retirement.partnerPensionStartAge || retirement.partnerRetireAge || 65) - (partnerAgeParam || 35);
+          if (year >= partnerPensionYear) {
+            pensionIncome += (retirement.partnerPensionAmount || 0) * inflationFactor;
+          }
+        }
+      }
+    }
+
+    // Pension is ordinary income (federal + state) but NOT subject to FICA
+    // We compute tax on earned income + pension together, then subtract FICA on earned only
+    let annualTax, monthlyAfterTax;
+    const totalEarnedIncome = salary + (partnerActive ? partnerSalary : 0);
+    if (partnerActive) {
+      // Federal + state on earned + pension; FICA on earned only
+      const totalWithPension = totalEarnedIncome + pensionIncome + ssIncome * 0.85;
+      const federalOnTotal = calcFederalTaxMFJ(totalWithPension, inflationFactor);
+      const ssWageCap = 176100 * inflationFactor;
+      const stateOnTotal = Math.max(0, totalWithPension - STANDARD_DEDUCTION_MFJ * inflationFactor) * STATE_TAX_BY_ZIP(activeZip);
+      const fica1 = Math.min(salary, ssWageCap) * 0.062 + salary * 0.0145;
+      const fica2 = Math.min(partnerSalary, ssWageCap) * 0.062 + partnerSalary * 0.0145;
+      annualTax = federalOnTotal + stateOnTotal + fica1 + fica2;
+      monthlyAfterTax = (totalEarnedIncome + pensionIncome + ssIncome - annualTax) / 12;
+    } else {
+      const totalWithPension = salary + pensionIncome + ssIncome * 0.85;
+      const federalOnTotal = calcFederalTax(totalWithPension, inflationFactor);
+      const ssWageCap = 176100 * inflationFactor;
+      const stateOnTotal = Math.max(0, totalWithPension - STANDARD_DEDUCTION_SINGLE * inflationFactor) * STATE_TAX_BY_ZIP(activeZip);
+      const fica = Math.min(salary, ssWageCap) * 0.062 + salary * 0.0145;
+      annualTax = federalOnTotal + stateOnTotal + fica;
+      monthlyAfterTax = (totalEarnedIncome + pensionIncome + ssIncome - annualTax) / 12;
+    }
+
+    // Child costs inflate with CPI
+    const childExpenses = kids.reduce((sum, k) => {
+      const childAge = year - k.birthYear;
+      // Base child cost (ages 0-17)
+      const baseCost = k.costMode === "custom" && k.phases?.length > 0
+        ? childCostCustom(childAge, k.phases) * inflationFactor
+        : childCostPerMonth(childAge, COL_MULTIPLIER_BY_ZIP(activeZip)) * inflationFactor;
+      // College cost (configurable age range)
+      const collegeStart = k.collegeStartAge ?? 18;
+      const collegeEnd = collegeStart + (k.collegeYears ?? 4);
+      const collegeCost = k.collegeEnabled && childAge >= collegeStart && childAge < collegeEnd
+        ? ((k.collegeAnnualAmount ?? 0) / 12) * inflationFactor
+        : 0;
+      return sum + (baseCost + collegeCost) * 12;
+    }, 0) / 12;
+
+    // Student loan amortization
+    let monthlyLoanPayment = 0;
+    let monthlyPartnerLoanPayment = 0;
+    if (loans?.enabled && loanBalance > 0) {
+      const pslfForgiven = loans.pslfEnabled && year === (loans.pslfYears || 10);
+      const pslfAlreadyDone = loans.pslfEnabled && year > (loans.pslfYears || 10);
+      if (pslfForgiven) {
+        // Add forgiven amount back to NW (if loan was included as a liability)
+        netWorthNominal += loanBalance;
+        loanBalance = 0;
+      } else if (pslfAlreadyDone) {
+        loanBalance = 0;
+      } else {
+        const loanMonthlyRate = (loans.interestRate || 6.5) / 100 / 12;
+        const effectivePmt = loans.ibrPct != null ? calcIBRPayment(currentSalary, loans.ibrPct, loans.amount, loans.interestRate) : (loans.monthlyPayment || 0);
+        const pmt = Math.min(effectivePmt, loanBalance * (1 + loanMonthlyRate));
+        for (let m = 0; m < 12; m++) {
+          const interest = loanBalance * loanMonthlyRate;
+          const principal = Math.max(0, pmt - interest);
+          loanBalance = Math.max(0, loanBalance - principal);
+        }
+        monthlyLoanPayment = pmt;
+      }
+    }
+    if (loans?.partnerEnabled && partnerActive && partnerLoanBalance > 0) {
+      const pslfForgiven = loans.partnerPslfEnabled && year === (loans.partnerPslfYears || 10);
+      const pslfAlreadyDone = loans.partnerPslfEnabled && year > (loans.partnerPslfYears || 10);
+      if (pslfForgiven) {
+        netWorthNominal += partnerLoanBalance;
+        partnerLoanBalance = 0;
+      } else if (pslfAlreadyDone) {
+        partnerLoanBalance = 0;
+      } else {
+        const loanMonthlyRate = (loans.partnerInterestRate || 6.5) / 100 / 12;
+        const effectivePartnerPmt = loans.partnerIbrPct != null ? calcIBRPayment(partner?.salary || 0, loans.partnerIbrPct, loans.partnerAmount, loans.partnerInterestRate) : (loans.partnerMonthlyPayment || 0);
+        const pmt = Math.min(effectivePartnerPmt, partnerLoanBalance * (1 + loanMonthlyRate));
+        for (let m = 0; m < 12; m++) {
+          const interest = partnerLoanBalance * loanMonthlyRate;
+          const principal = Math.max(0, pmt - interest);
+          partnerLoanBalance = Math.max(0, partnerLoanBalance - principal);
+        }
+        monthlyPartnerLoanPayment = pmt;
+      }
+    }
+
+    const partnerExpenses = partnerActive ? (partnerRent + partnerOther) : 0;
+    const propTaxRate = home?.taxRate != null ? home.taxRate / 100 : PROPERTY_TAX_BY_ZIP(activeZip);
+    const monthlyPropertyTax = homeActive ? (propertyValue * propTaxRate / 12) : 0;
+    const monthlyHOA = homeActive ? (home?.hoaFee || 0) * Math.pow(1 + inflationPct / 100, year) : 0;
+    const activeMortgagePayment = homeActive && mortgageBalance > 0 ? monthlyMortgagePayment : 0;
+    const housingCost = homeActive ? activeMortgagePayment + monthlyPropertyTax + monthlyHOA : rent;
+    const monthlyExpenses = housingCost + other + childExpenses + partnerExpenses + monthlyLoanPayment + monthlyPartnerLoanPayment;
+    const monthlySavings = monthlyAfterTax - monthlyExpenses;
+
+    if (year > 0) {
+      // Use per-year return/inflation if provided (Monte Carlo path), else use base rates
+      const yearReturn = (annualReturns && annualReturns[year] != null)
+        ? annualReturns[year] : investmentReturnPct;
+      const yearInflation = (annualInflations && annualInflations[year] != null)
+        ? annualInflations[year] : inflationPct;
+      const nominalMonthlyReturn = Math.pow(1 + yearReturn / 100, 1 / 12) - 1;
+      for (let m = 0; m < 12; m++) {
+        // Compute uninvested (cash/emergency fund) — grows with inflation only
+        let uninvestedAmt = 0;
+        if (uninvested?.enabled && netWorthNominal > 0) {
+          uninvestedAmt = uninvested.mode === "fixed"
+            ? Math.min((uninvested.amount || 0) * inflationFactor, netWorthNominal)
+            : Math.min(netWorthNominal * (uninvested.pct || 0) / 100, netWorthNominal);
+        }
+        const investable = Math.max(0, netWorthNominal - uninvestedAmt);
+        const nominalMonthlyInflation = Math.pow(1 + yearInflation / 100, 1 / 12) - 1;
+        netWorthNominal = investable * (1 + nominalMonthlyReturn)
+          + uninvestedAmt * (1 + nominalMonthlyInflation)
+          + Math.min(0, netWorthNominal - uninvestedAmt)
+          + monthlySavings;
+      }
+    }
+
+    const homeEquity = homeActive ? Math.max(0, propertyValue - mortgageBalance) : 0;
+    // Display adjustment: if user chose not to show loan as liability, add it back for display only
+    const displayLoanAdj = (loans?.enabled && loans?.includeInNetWorth === false) ? loanBalance : 0;
+    const displayPartnerLoanAdj = (loans?.partnerEnabled && loans?.partnerIncludeInNetWorth === false) ? partnerLoanBalance : 0;
+    const displayAdj = displayLoanAdj + displayPartnerLoanAdj;
+    const liquidNW = netWorthNominal + displayAdj;
+    const totalNWNominal = liquidNW + homeEquity;
+    const netWorthReal = totalNWNominal * deflator;
+    const liquidNWReal = liquidNW * deflator;
+
+    data.push({
+      year,
+      netWorthNominal: Math.round(totalNWNominal),
+      netWorthReal: Math.round(netWorthReal),
+      liquidNW: Math.round(liquidNW),
+      liquidNWReal: Math.round(liquidNWReal),
+      investedNWReal: Math.round(Math.max(0, liquidNW - (uninvested?.enabled
+        ? (uninvested.mode === "fixed"
+          ? Math.min((uninvested.amount || 0) * inflationFactor, liquidNW)
+          : Math.min(liquidNW * (uninvested.pct || 0) / 100, liquidNW))
+        : 0)) * deflator),
+      homeEquity: Math.round(homeEquity),
+      homeEquityReal: Math.round(homeEquity * deflator),
+      propertyValue: Math.round(propertyValue),
+      mortgageBalance: Math.round(mortgageBalance),
+      monthlyPropertyTax: Math.round(homeActive ? propertyValue * (home?.taxRate != null ? home.taxRate / 100 : PROPERTY_TAX_BY_ZIP(activeZip)) / 12 : 0),
+      salary: Math.round(salary + pensionIncome + ssIncome),
+      salaryReal: Math.round((salary + pensionIncome + ssIncome) * deflator),
+      partnerSalary: Math.round(partnerSalary),
+      combinedSalary: Math.round(salary + partnerSalary + pensionIncome + ssIncome),
+      combinedSalaryReal: Math.round((salary + partnerSalary + pensionIncome + ssIncome) * deflator),
+      monthlyAfterTax: Math.round(monthlyAfterTax),
+      monthlyAfterTaxReal: Math.round(monthlyAfterTax * deflator),
+      monthlyExpenses: Math.round(monthlyExpenses),
+      monthlyExpensesReal: Math.round(monthlyExpenses * deflator),
+      monthlySavings: Math.round(monthlySavings),
+      monthlySavingsReal: Math.round(monthlySavings * deflator),
+      childExpenses: Math.round(childExpenses),
+      annualTax: Math.round(annualTax),
+      inflationFactor: inflationFactor.toFixed(2),
+      activeZip,
+    });
+  }
+
+  return data;
+}
+
+// ── Formatting ────────────────────────────────────────────────────────────────
+const fmt = (n) => {
+  if (Math.abs(n) >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+  if (Math.abs(n) >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
+  return `$${Math.round(n)}`;
+};
+const fmtFull = (n) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+
+const CustomTooltip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{ background: "#0a0d14", border: "1px solid #2a2d3a", borderRadius: 10, padding: "12px 16px", fontSize: 12 }}>
+      <p style={{ color: "#6b7280", marginBottom: 8, fontWeight: 600 }}>Year {label}</p>
+      {payload.map(p => (
+        <p key={p.name} style={{ color: p.color, margin: "3px 0", display: "flex", justifyContent: "space-between", gap: 24 }}>
+          <span>{p.name}</span>
+          <strong>{fmtFull(p.value)}</strong>
+        </p>
+      ))}
+    </div>
+  );
+};
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+const Input = ({ label, value, onChange, prefix, suffix, type = "number", min, step, placeholder }) => (
+  <div style={{ marginBottom: 13 }}>
+    <label style={{ display: "block", fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", marginBottom: 5 }}>{label}</label>
+    <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+      {prefix && <span style={{ position: "absolute", left: 11, color: "#6b7280", fontSize: 13, zIndex: 1 }}>{prefix}</span>}
+      <input type={type} value={value}
+        onChange={e => onChange(type === "number" ? parseFloat(e.target.value) || 0 : e.target.value)}
+        min={min} step={step} placeholder={placeholder}
+        style={{
+          width: "100%", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 7,
+          padding: `9px ${suffix ? "38px" : "11px"} 9px ${prefix ? "24px" : "11px"}`,
+          color: "#e8eaf0", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", outline: "none",
+          boxSizing: "border-box", transition: "border-color 0.15s",
+        }}
+        onFocus={e => e.target.style.borderColor = "#4f8ef7"}
+        onBlur={e => e.target.style.borderColor = "#1c1f2b"}
+      />
+      {suffix && <span style={{ position: "absolute", right: 11, color: "#6b7280", fontSize: 12 }}>{suffix}</span>}
+    </div>
+  </div>
+);
+
+const InfoPopup = ({ info }) => {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div style={{ position: "relative", display: "inline-block" }}>
+      <button onClick={() => setOpen(o => !o)} style={{
+        background: "transparent", border: "1px solid #1c1f2b", borderRadius: "50%",
+        width: 16, height: 16, cursor: "pointer", color: "#374151", fontSize: 10,
+        fontWeight: 700, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center",
+        flexShrink: 0,
+      }}>?</button>
+      {open && (
+        <div style={{
+          position: "absolute", left: 0, top: 22, zIndex: 100, width: 280,
+          background: "#0d1117", border: "1px solid #2a2d3a", borderRadius: 10,
+          padding: "14px 16px", fontSize: 11, lineHeight: 1.7, color: "#9ca3af",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
+        }}>
+          <button onClick={() => setOpen(false)} style={{
+            float: "right", background: "transparent", border: "none", color: "#374151",
+            cursor: "pointer", fontSize: 14, lineHeight: 1, marginLeft: 8,
+          }}>×</button>
+          {info.sections.map((s, i) => (
+            <div key={i} style={{ marginBottom: i < info.sections.length - 1 ? 10 : 0 }}>
+              <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4f8ef7", marginBottom: 4 }}>{s.heading}</div>
+              <div style={{ color: "#6b7280" }}>{s.body}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const Section = ({ title, icon, info, children }) => (
+  <div style={{ marginBottom: 26 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 13, paddingBottom: 10, borderBottom: "1px solid #111827" }}>
+      <span style={{ fontSize: 14 }}>{icon}</span>
+      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "#4f8ef7", flex: 1 }}>{title}</span>
+      {info && <InfoPopup info={info} />}
+    </div>
+    {children}
+  </div>
+);
+
+const Toggle = ({ options, value, onChange }) => (
+  <div style={{ display: "flex", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 7, overflow: "hidden", marginBottom: 12 }}>
+    {options.map(o => (
+      <button key={o.value} onClick={() => onChange(o.value)} style={{
+        flex: 1, padding: "8px 10px", border: "none", cursor: "pointer", fontSize: 11,
+        fontWeight: 700, letterSpacing: "0.04em",
+        background: value === o.value ? "#4f8ef7" : "transparent",
+        color: value === o.value ? "#fff" : "#6b7280", transition: "all 0.15s",
+      }}>{o.label}</button>
+    ))}
+  </div>
+);
+
+// Reusable step-increase editor
+const StepEditor = ({ steps, setSteps, valueLabel, valueField, defaultValue }) => {
+  const updateStep = (i, field, val) =>
+    setSteps(s => s.map((st, idx) => idx === i ? { ...st, [field]: val } : st));
+  const addStep = () =>
+    setSteps(s => [...s, { year: (s[s.length - 1]?.year || 0) + 3, [valueField]: defaultValue }]);
+  const removeStep = (i) => setSteps(s => s.filter((_, idx) => idx !== i));
+
+  const inlineInput = (val, onChange) => (
+    <input type="number" value={val} onChange={e => onChange(parseFloat(e.target.value) || 0)}
+      style={{ background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, padding: "7px 9px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", width: "100%" }} />
+  );
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 28px", gap: 5, marginBottom: 6 }}>
+        {["Year", valueLabel, ""].map(h => <div key={h} style={{ fontSize: 9, color: "#374151", letterSpacing: "0.1em", textTransform: "uppercase" }}>{h}</div>)}
+      </div>
+      {steps.map((st, i) => (
+        <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 28px", gap: 5, marginBottom: 5 }}>
+          {inlineInput(st.year, v => updateStep(i, "year", v))}
+          {inlineInput(st[valueField], v => updateStep(i, valueField, v))}
+          <button onClick={() => removeStep(i)} style={{ background: "transparent", border: "1px solid #1c1f2b", borderRadius: 6, color: "#f87171", cursor: "pointer", fontSize: 13 }}>×</button>
+        </div>
+      ))}
+      <button onClick={addStep} style={{ width: "100%", padding: "7px", background: "transparent", border: "1px dashed #1c1f2b", borderRadius: 6, color: "#4f8ef7", fontSize: 11, cursor: "pointer", marginTop: 2 }}>+ Add Step</button>
+    </div>
+  );
+};
+
+
+// ── Medical Specialties ───────────────────────────────────────────────────────
+// residencyYears includes fellowship where applicable (e.g. cardiology = 3yr IM + 3yr fellowship)
+// avgSalary = median attending compensation (Medscape / MGMA 2024)
+const MEDICAL_SPECIALTIES = [
+  { name: "Allergy & Immunology",         residencyYears: 5, avgSalary: 290000 },
+  { name: "Anesthesiology",               residencyYears: 4, avgSalary: 405000 },
+  { name: "Cardiac Surgery",              residencyYears: 8, avgSalary: 620000 },
+  { name: "Cardiology",                   residencyYears: 6, avgSalary: 490000 },
+  { name: "Child & Adolescent Psychiatry",residencyYears: 5, avgSalary: 240000 },
+  { name: "Clinical Genetics",            residencyYears: 4, avgSalary: 220000 },
+  { name: "Colon & Rectal Surgery",       residencyYears: 6, avgSalary: 430000 },
+  { name: "Critical Care Medicine",       residencyYears: 6, avgSalary: 370000 },
+  { name: "Dermatology",                  residencyYears: 4, avgSalary: 440000 },
+  { name: "Emergency Medicine",           residencyYears: 3, avgSalary: 350000 },
+  { name: "Endocrinology",                residencyYears: 5, avgSalary: 245000 },
+  { name: "Family Medicine",              residencyYears: 3, avgSalary: 255000 },
+  { name: "Gastroenterology",             residencyYears: 6, avgSalary: 480000 },
+  { name: "General Surgery",              residencyYears: 5, avgSalary: 390000 },
+  { name: "Geriatric Medicine",           residencyYears: 5, avgSalary: 230000 },
+  { name: "Hematology / Oncology",        residencyYears: 6, avgSalary: 450000 },
+  { name: "Hospitalist (Internal Med)",   residencyYears: 3, avgSalary: 285000 },
+  { name: "Infectious Disease",           residencyYears: 5, avgSalary: 240000 },
+  { name: "Internal Medicine",            residencyYears: 3, avgSalary: 264000 },
+  { name: "Interventional Cardiology",    residencyYears: 7, avgSalary: 560000 },
+  { name: "Interventional Radiology",     residencyYears: 6, avgSalary: 490000 },
+  { name: "Medical Oncology",             residencyYears: 6, avgSalary: 430000 },
+  { name: "Nephrology",                   residencyYears: 5, avgSalary: 290000 },
+  { name: "Neurological Surgery",         residencyYears: 7, avgSalary: 790000 },
+  { name: "Neurology",                    residencyYears: 4, avgSalary: 295000 },
+  { name: "Obstetrics & Gynecology",      residencyYears: 4, avgSalary: 335000 },
+  { name: "Ophthalmology",                residencyYears: 4, avgSalary: 370000 },
+  { name: "Orthopedic Surgery",           residencyYears: 5, avgSalary: 590000 },
+  { name: "Otolaryngology (ENT)",         residencyYears: 5, avgSalary: 400000 },
+  { name: "Pain Medicine",                residencyYears: 5, avgSalary: 360000 },
+  { name: "Palliative Care",              residencyYears: 5, avgSalary: 210000 },
+  { name: "Pediatric Surgery",            residencyYears: 7, avgSalary: 490000 },
+  { name: "Pediatrics",                   residencyYears: 3, avgSalary: 240000 },
+  { name: "Physical Medicine & Rehab",    residencyYears: 4, avgSalary: 285000 },
+  { name: "Plastic Surgery",              residencyYears: 6, avgSalary: 550000 },
+  { name: "Psychiatry",                   residencyYears: 4, avgSalary: 275000 },
+  { name: "Pulmonology",                  residencyYears: 5, avgSalary: 320000 },
+  { name: "Radiation Oncology",           residencyYears: 5, avgSalary: 490000 },
+  { name: "Radiology (Diagnostic)",       residencyYears: 5, avgSalary: 470000 },
+  { name: "Rheumatology",                 residencyYears: 5, avgSalary: 265000 },
+  { name: "Sleep Medicine",               residencyYears: 5, avgSalary: 280000 },
+  { name: "Sports Medicine",              residencyYears: 5, avgSalary: 275000 },
+  { name: "Thoracic Surgery",             residencyYears: 7, avgSalary: 580000 },
+  { name: "Transplant Surgery",           residencyYears: 7, avgSalary: 520000 },
+  { name: "Urology",                      residencyYears: 5, avgSalary: 470000 },
+  { name: "Vascular Surgery",             residencyYears: 7, avgSalary: 480000 },
+];
+// ── IBR payment calculator ────────────────────────────────────────────────────
+// Federal poverty line 2024 (single person, lower 48): ~$15,060
+// SAVE uses 225% of FPL, IBR uses 150% of FPL
+const POVERTY_LINE = 15060;
+function calcIBRPayment(annualSalary, ibrPct, loanBalance = 0, loanRate = 6.5) {
+  // SAVE plan uses 225% FPL; classic IBR uses 150% FPL
+  const fplMultiplier = ibrPct === 5 ? 2.25 : 1.50;
+  const discretionary = Math.max(0, annualSalary - POVERTY_LINE * fplMultiplier);
+  const ibrPayment = Math.round(discretionary * (ibrPct / 100) / 12);
+  // Cap at standard 10-year repayment amount (if balance known)
+  if (loanBalance > 0) {
+    const r = loanRate / 100 / 12;
+    const n = 120; // 10 years
+    const standardPayment = r === 0 ? loanBalance / n
+      : Math.round(loanBalance * r * Math.pow(1 + r, n) / (Math.pow(1 + r, n) - 1));
+    return Math.min(ibrPayment, standardPayment);
+  }
+  return ibrPayment;
+}
+
+// ── Loan balance projection helper ───────────────────────────────────────────
+function projectedLoanBalance(balance, annualRate, monthlyPayment, years) {
+  let bal = balance;
+  const r = annualRate / 100 / 12;
+  const totalMonths = years * 12;
+  for (let m = 0; m < totalMonths; m++) {
+    if (bal <= 0) return 0;
+    const interest = bal * r;
+    const principal = Math.max(0, monthlyPayment - interest);
+    bal = Math.max(0, bal - principal);
+  }
+  return Math.round(bal);
+}
+
+// ── SSA Benefit Calculator ───────────────────────────────────────────────────
+// Bend points for 2025 (in today's dollars, adjusted for wage growth since 1977)
+// PIA = 90% of first $1,226 AIME + 32% of next $6,172 + 15% above $7,398
+const SS_BEND1 = 1226;
+const SS_BEND2 = 7398;
+
+// Estimate monthly SS benefit at FRA (67) given a salary history
+// salaryHistory: array of annual salaries (today's dollars) covering working years
+// currentAge: used to fill in past years before the projection starts
+function calcSSBenefit(annualSalary, currentAge, salaryStepsData, salaryGrowthMode, salaryGrowthPct, inflationPct) {
+  // Build a 35-year earnings history in today's dollars
+  // We project backwards from current salary and forwards using salary growth
+  const totalYears = 35;
+  const earnings = [];
+
+  // Past years: approximate as current salary (could be lower, but no history available)
+  // Younger workers will have fewer past working years — fill with 0 for years before age 22
+  const workingYearsToDate = Math.max(0, Math.min(currentAge - 22, totalYears));
+
+  // Use average of past salary as approximation — assume they earned current salary in past
+  // (conservative — actual past earnings may be lower for residents/trainees)
+  for (let i = 0; i < workingYearsToDate; i++) {
+    earnings.push(annualSalary);
+  }
+
+  // Future years: use base salary growth rate
+  let futureSalary = annualSalary;
+  const futureYears = totalYears - workingYearsToDate;
+  for (let yr = 1; yr <= futureYears; yr++) {
+    // Apply step raises if present
+    const step = (salaryStepsData || []).find(s => s.year === yr);
+    if (step && salaryGrowthMode === "steps") {
+      futureSalary = step.salary;
+    } else if (salaryGrowthMode === "percentage") {
+      futureSalary = futureSalary * (1 + salaryGrowthPct / 100);
+    }
+    earnings.push(Math.max(0, futureSalary));
+  }
+
+  // SS taxes max out at ~$176K/year (2025 wage base) — cap earnings
+  const SS_WAGE_BASE = 176100;
+  const cappedEarnings = earnings.map(e => Math.min(e, SS_WAGE_BASE));
+
+  // Take top 35 years (already have exactly 35, but sort descending just in case)
+  const top35 = cappedEarnings.sort((a, b) => b - a).slice(0, 35);
+  const AIME = top35.reduce((s, e) => s + e, 0) / 35 / 12;
+
+  // Apply bend-point formula
+  let pia = 0;
+  if (AIME <= SS_BEND1) {
+    pia = AIME * 0.90;
+  } else if (AIME <= SS_BEND2) {
+    pia = SS_BEND1 * 0.90 + (AIME - SS_BEND1) * 0.32;
+  } else {
+    pia = SS_BEND1 * 0.90 + (SS_BEND2 - SS_BEND1) * 0.32 + (AIME - SS_BEND2) * 0.15;
+  }
+
+  return Math.round(pia);
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+function NetWorthCalculator() {
+  const [specialtyEnabled, setSpecialtyEnabled] = useState(false);
+  const [selectedSpecialty, setSelectedSpecialty] = useState(null);
+
+  const applySpecialty = (spec) => {
+    if (!spec) { setSelectedSpecialty(null); setNetWorth(50000); setSalaryMode('percentage'); setSalarySteps([{ year: 5, salary: 120000 }]); return; }
+    setSelectedSpecialty(spec);
+    setNetWorth(-100000);
+    setSalary(75000);
+    setSalaryMode("steps");
+    setSalarySteps([{ year: spec.residencyYears, salary: spec.avgSalary }]);
+  };
+
+  const [currentAge, setCurrentAge]       = useState(35);
+  const [partnerAge, setPartnerAge]       = useState(35);
+  const [netWorth, setNetWorth]           = useState(0);
+  const [salary, setSalary]               = useState(75000);
+  const [salaryMode, setSalaryMode]       = useState("percentage");
+  const [salaryGrowthPct, setSalaryGrowthPct] = useState(0);
+  const [salarySteps, setSalarySteps]     = useState([{ year: 5, salary: 120000 }]);
+
+  const [rent, setRent]                   = useState(1500);
+  const [rentMode, setRentMode]           = useState("percentage");
+  const [rentGrowthPct, setRentGrowthPct] = useState(0);
+  const [rentSteps, setRentSteps]         = useState([{ year: 5, amount: 2800 }]);
+
+  const [otherExp, setOtherExp]           = useState(1500);
+  const [otherMode, setOtherMode]         = useState("percentage");
+  const [otherGrowthPct, setOtherGrowthPct] = useState(0);
+  const [otherSteps, setOtherSteps]       = useState([{ year: 5, amount: 2800 }]);
+
+  const [zip, setZip]                     = useState("10001");
+  const [zipMoves, setZipMoves]           = useState([]);
+  const [newMoveYear, setNewMoveYear]     = useState(5);
+  const [newMoveZip, setNewMoveZip]       = useState("");
+  const [returnPct, setReturnPct]         = useState(10.5);
+  const [inflationKey, setInflationKey]   = useState("historical");
+  const [customInflation, setCustomInflation] = useState(3.1);
+  const [useCustomInflation, setUseCustomInflation] = useState(false);
+  const [projYears, setProjYears]         = useState(10);
+  const [kids, setKids]                   = useState([]);
+  const [newKidYear, setNewKidYear]       = useState(3);
+  const [partner, setPartner] = useState({
+    enabled: false,
+    netWorth: 0,
+    salary: 75000,
+    salaryMode: "percentage",
+    salaryGrowthPct: 0,
+    salarySteps: [{ year: 5, salary: 120000 }],
+    rent: 0,
+    rentMode: "percentage",
+    rentGrowthPct: 0,
+    rentSteps: [{ year: 5, amount: 400 }],
+    otherExp: 0,
+    otherMode: "percentage",
+    otherGrowthPct: 0,
+    otherSteps: [{ year: 5, amount: 1000 }],
+    marriageYear: 0,
+  });
+  const updatePartner = (field, val) => setPartner(p => ({ ...p, [field]: val }));
+
+  const [loans, setLoans] = useState({
+    enabled: false,
+    amount: 200000,
+    interestRate: 6.5,
+    monthlyPayment: 562,
+    includeInNetWorth: true,
+    pslfEnabled: false,
+    pslfYears: 10,
+    ibrPct: 10, // null = manual, 5/10/15 = IBR calculated
+    // Partner
+    partnerEnabled: false,
+    partnerAmount: 200000,
+    partnerInterestRate: 6.5,
+    partnerMonthlyPayment: 562,
+    partnerIncludeInNetWorth: true,
+    partnerPslfEnabled: false,
+    partnerPslfYears: 10,
+    partnerIbrPct: 10,
+  });
+  const updateLoans = (field, val) => setLoans(l => ({ ...l, [field]: val }));
+
+  const [retirement, setRetirement] = useState({
+    enabled: false,
+    retireAge: 65,
+    pensionEnabled: false,
+    pensionAmount: 30000, // annual, today's dollars
+    partnerCurrentAge: 35,
+    partnerRetireAge: 65,
+    partnerPensionEnabled: false,
+    partnerPensionAmount: 30000,
+  });
+  const updateRetirement = (field, val) => setRetirement(r => ({ ...r, [field]: val }));
+
+  const [uninvested, setUninvested] = useState({
+    enabled: false,
+    mode: "fixed",   // "fixed" | "percentage"
+    amount: 0,       // fixed dollar amount (today's dollars)
+    pct: 5,          // percentage of net worth
+  });
+  const updateUninvested = (field, val) => setUninvested(u => ({ ...u, [field]: val }));
+
+  const [fire, setFire] = useState({
+    targetMode: "spending",  // "spending" | "networth"
+    annualSpending: 100000,  // today's dollars
+    targetNetWorth: 2500000, // today's dollars
+    withdrawalRate: 4.0,     // % (for spending → NW calc)
+    withdrawalTaxRate: 15.0,  // % effective tax on withdrawals (used only in manual mode)
+    withdrawalTaxMode: 'auto',   // 'auto' | 'manual'
+    coastRetireAge: 65,
+    baristaEnabled: true,
+    baristaIncome: 24000,  // annual part-time income, today's dollars
+  });
+  const updateFire = (field, val) => setFire(f => ({ ...f, [field]: val }));
+
+  const [ss, setSS] = useState({
+    enabled: false,
+    claimAge: 67,             // age to claim (62-70)
+    partnerClaimAge: 67,
+  });
+  const updateSS = (field, val) => setSS(s => ({ ...s, [field]: val }));
+
+  const resetAll = () => {
+    setSpecialtyEnabled(false); setSelectedSpecialty(null);
+    setCurrentAge(35); setPartnerAge(35); setNetWorth(0); setSalary(75000);
+    setSalaryMode("percentage"); setSalaryGrowthPct(0); setSalarySteps([{ year: 5, salary: 120000 }]);
+    setRent(1500); setRentMode("percentage"); setRentGrowthPct(0); setRentSteps([{ year: 5, amount: 2800 }]);
+    setOtherExp(1500); setOtherMode("percentage"); setOtherGrowthPct(0); setOtherSteps([{ year: 5, amount: 2800 }]);
+    setZip("10001"); setZipMoves([]); setNewMoveYear(5); setNewMoveZip("");
+    setReturnPct(10.5); setInflationKey("historical"); setCustomInflation(3.1); setUseCustomInflation(false);
+    setProjYears(10); setKids([]); setNewKidYear(3);
+    setPartner({ enabled: false, netWorth: 0, salary: 75000, salaryMode: "percentage", salaryGrowthPct: 0,
+      salarySteps: [{ year: 5, salary: 120000 }], rent: 0, rentMode: "percentage", rentGrowthPct: 0,
+      rentSteps: [{ year: 5, amount: 400 }], otherExp: 0, otherMode: "percentage", otherGrowthPct: 0,
+      otherSteps: [{ year: 5, amount: 1000 }], marriageYear: 0 });
+    setLoans({ enabled: false, amount: 200000, interestRate: 6.5, monthlyPayment: 562,
+      includeInNetWorth: true, pslfEnabled: false, pslfYears: 10, ibrPct: 10,
+      partnerEnabled: false, partnerAmount: 200000, partnerInterestRate: 6.5, partnerMonthlyPayment: 562,
+      partnerIncludeInNetWorth: true, partnerPslfEnabled: false, partnerPslfYears: 10, partnerIbrPct: 10 });
+    setRetirement({ enabled: false, retireAge: 65, pensionEnabled: false,
+      pensionAmount: 30000, pensionStartAge: 65, partnerRetireAge: 65,
+      partnerPensionEnabled: false, partnerPensionAmount: 30000, partnerPensionStartAge: 65 });
+    setUninvested({ enabled: false, mode: "fixed", amount: 0, pct: 5 });
+    setHome({ enabled: false, purchaseYear: 3, purchasePrice: 600000, downPct: 20,
+      termYears: 15, interestRate: 5.25, appreciationPct: 4.0, taxRate: null, hoaFee: 0,
+      familyGiftEnabled: false, familyGiftAmount: 0 });
+    setFire({ targetMode: "spending", annualSpending: 100000, targetNetWorth: 2500000,
+      withdrawalRate: 4.0, withdrawalTaxRate: 15.0, withdrawalTaxMode: "auto",
+      coastRetireAge: 65, baristaEnabled: true, baristaIncome: 24000 });
+    setDisplayMode("real"); setActiveTab("networth");
+    setSS({ enabled: false, claimAge: 67, partnerClaimAge: 67 });
+  };
+
+  const getSnapshot = () => ({
+    version: 1,
+    specialtyEnabled, selectedSpecialty,
+    netWorth, salary, salaryMode, salaryGrowthPct, salarySteps,
+    rent, rentMode, rentGrowthPct, rentSteps,
+    otherExp, otherMode, otherGrowthPct, otherSteps,
+    zip, zipMoves, returnPct,
+    inflationKey, customInflation, useCustomInflation,
+    projYears, kids, partner, home, displayMode, retirement, loans, uninvested, fire, ss,
+  });
+
+  const downloadSettings = () => {
+    const json = JSON.stringify(getSnapshot(), null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "nw-forecast-settings.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const loadSettings = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const s = JSON.parse(ev.target.result);
+        if (s.specialtyEnabled !== undefined) setSpecialtyEnabled(s.specialtyEnabled);
+        if (s.selectedSpecialty !== undefined) setSelectedSpecialty(s.selectedSpecialty);
+        if (s.netWorth !== undefined) setNetWorth(s.netWorth);
+        if (s.salary !== undefined) setSalary(s.salary);
+        if (s.salaryMode !== undefined) setSalaryMode(s.salaryMode);
+        if (s.salaryGrowthPct !== undefined) setSalaryGrowthPct(s.salaryGrowthPct);
+        if (s.salarySteps !== undefined) setSalarySteps(s.salarySteps);
+        if (s.rent !== undefined) setRent(s.rent);
+        if (s.rentMode !== undefined) setRentMode(s.rentMode);
+        if (s.rentGrowthPct !== undefined) setRentGrowthPct(s.rentGrowthPct);
+        if (s.rentSteps !== undefined) setRentSteps(s.rentSteps);
+        if (s.otherExp !== undefined) setOtherExp(s.otherExp);
+        if (s.otherMode !== undefined) setOtherMode(s.otherMode);
+        if (s.otherGrowthPct !== undefined) setOtherGrowthPct(s.otherGrowthPct);
+        if (s.otherSteps !== undefined) setOtherSteps(s.otherSteps);
+        if (s.zip !== undefined) setZip(s.zip);
+        if (s.zipMoves !== undefined) setZipMoves(s.zipMoves);
+        if (s.returnPct !== undefined) setReturnPct(s.returnPct);
+        if (s.inflationKey !== undefined) setInflationKey(s.inflationKey);
+        if (s.customInflation !== undefined) setCustomInflation(s.customInflation);
+        if (s.useCustomInflation !== undefined) setUseCustomInflation(s.useCustomInflation);
+        if (s.projYears !== undefined) setProjYears(s.projYears);
+        if (s.kids !== undefined) setKids(s.kids);
+        if (s.partner !== undefined) setPartner(s.partner);
+        if (s.home !== undefined) setHome(s.home);
+        if (s.displayMode !== undefined) setDisplayMode(s.displayMode);
+        if (s.retirement !== undefined) setRetirement(s.retirement);
+        if (s.loans !== undefined) setLoans(s.loans);
+        if (s.uninvested !== undefined) setUninvested(s.uninvested);
+        if (s.fire !== undefined) setFire(s.fire);
+        if (s.ss !== undefined) setSS(s.ss);
+      } catch (err) {
+        alert("Failed to load settings: " + err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ""; // reset so same file can be re-loaded
+  };
+
+  const [home, setHome] = useState({
+    enabled: false,
+    purchaseYear: 3,
+    purchasePrice: 600000,
+    downPct: 20,
+    termYears: 15,
+    interestRate: 5.25,
+    appreciationPct: 4.0,
+    taxRate: null, // null = auto from ZIP
+    hoaFee: 0,
+    familyGiftEnabled: false,
+    familyGiftAmount: 0,
+  });
+  const updateHome = (field, val) => setHome(h => ({ ...h, [field]: val }));
+
+  const [displayMode, setDisplayMode]     = useState("real"); // "nominal" | "real" | "both"
+  const [activeTab, setActiveTab]         = useState("networth");
+
+  const inflationPct = useCustomInflation ? customInflation : INFLATION_PRESETS[inflationKey].pct;
+
+  const updateSalaryStep = (i, field, val) =>
+    setSalarySteps(s => s.map((st, idx) => idx === i ? { ...st, [field]: val } : st));
+  const addSalaryStep = () => setSalarySteps(s => [...s, { year: (s[s.length - 1]?.year || 0) + 3, salary: salary + 20000 }]);
+  const removeSalaryStep = (i) => setSalarySteps(s => s.filter((_, idx) => idx !== i));
+
+  const addKid = () => {
+    const col = COL_MULTIPLIER_BY_ZIP(zip);
+    setKids(k => [...k, {
+      id: Date.now(),
+      birthYear: newKidYear,
+      costMode: 'auto',
+      phases: [
+        { years: 1,  amount: Math.round(2200 * col) }, // infant
+        { years: 4,  amount: Math.round(1800 * col) }, // toddler
+        { years: 8,  amount: Math.round(1100 * col) }, // school age
+        { years: 5,  amount: Math.round(1300 * col) }, // teen
+      ],
+      collegeEnabled: false,
+      collegeStartAge: 18,
+      collegeYears: 4,
+      collegeAnnualAmount: 30000, // today's dollars/year
+    }]);
+  };
+  const removeKid = (id) => setKids(k => k.filter(c => c.id !== id));
+
+  const addMove = () => {
+    if (newMoveZip.length < 5) return;
+    setZipMoves(m => [...m, { id: Date.now(), year: newMoveYear, zip: newMoveZip }]);
+    setNewMoveZip("");
+  };
+  const removeMove = (id) => setZipMoves(m => m.filter(mv => mv.id !== id));
+
+  const ssCalc = useMemo(() => {
+    const ssCurrentAge = currentAge || 35;
+    const partnerAgeForSS = partner.enabled ? (partnerAge || 35) : 35;
+    const myBenefit = calcSSBenefit(salary, ssCurrentAge, salarySteps, salaryMode, salaryGrowthPct, inflationPct);
+    const partnerBenefit = partner.enabled
+      ? calcSSBenefit(partner.salary, partnerAgeForSS, partner.salarySteps, partner.salaryMode || "percentage", partner.salaryGrowthPct || 0, inflationPct)
+      : 0;
+    return { myBenefit, partnerBenefit };
+  }, [salary, salaryMode, salaryGrowthPct, salarySteps, partner, inflationPct, currentAge, partnerAge]);
+
+  const data = useMemo(() => runProjection({
+    currentAge, partnerAge, currentNetWorth: netWorth, currentSalary: salary,
+    salaryGrowthMode: salaryMode, salaryGrowthPct, salarySteps,
+    monthlyRent: rent, rentGrowthMode: rentMode, rentGrowthPct, rentSteps,
+    monthlyOtherExpenses: otherExp, otherGrowthMode: otherMode, otherGrowthPct, otherSteps,
+    zip, zipMoves, investmentReturnPct: returnPct, inflationPct,
+    kids, projectionYears: projYears,
+    partner,
+    home,
+    retirement,
+    loans,
+    uninvested,
+    ss: (() => {
+      if (!ss?.enabled) return ss;
+      const age = currentAge || 35;
+      const pAge = partnerAge || 35;
+      return { ...ss,
+        calculatedBenefit: calcSSBenefit(salary, age, salarySteps, salaryMode, salaryGrowthPct, inflationPct),
+        partnerCalculatedBenefit: partner.enabled ? calcSSBenefit(partner.salary, pAge, partner.salarySteps, partner.salaryMode || "percentage", partner.salaryGrowthPct || 0, inflationPct) : 0,
+      };
+    })(),
+  }), [netWorth, salary, salaryMode, salaryGrowthPct, salarySteps,
+       rent, rentMode, rentGrowthPct, rentSteps,
+       otherExp, otherMode, otherGrowthPct, otherSteps,
+       zip, zipMoves, returnPct, inflationPct, kids, projYears, partner, home, retirement, loans, uninvested, ss, currentAge, partnerAge]);
+
+  const { yDomain, yTicks } = useMemo(() => {
+    const nominalKey = activeTab === "networth" ? "netWorthNominal"
+      : activeTab === "salary" ? "combinedSalary"
+      : activeTab === "expenses" ? "monthlyExpenses"
+      : "monthlySavings";
+    const vals = data.map(d => d[nominalKey]).filter(v => v != null);
+    if (!vals.length) return { yDomain: ["auto", "auto"], yTicks: [] };
+    const rawMin = Math.min(0, ...vals);
+    const rawMax = Math.max(...vals);
+    const range = rawMax - rawMin || 1;
+    // Pick a nice step that gives ~5 ticks
+    const roughStep = range / 5;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(roughStep)));
+    const niceFractions = [1, 2, 2.5, 5, 10];
+    const step = niceFractions.map(f => f * magnitude).find(s => s >= roughStep) || magnitude * 10;
+    const niceMin = Math.floor(rawMin / step) * step;
+    const niceMax = Math.ceil(rawMax / step) * step;
+    const ticks = [];
+    for (let t = niceMin; t <= niceMax + step * 0.001; t += step) {
+      ticks.push(Math.round(t));
+    }
+    return { yDomain: [niceMin, niceMax], yTicks: ticks };
+  }, [data, activeTab]);
+
+
+
+  const chartData = data;
+
+  const mcChartData = data;
+
+  // FIRE calculations
+  const fireCalc = useMemo(() => {
+    // Compute effective withdrawal tax rate from the model's tax functions
+    // We solve iteratively: gross = net / (1 - effectiveRate), where effectiveRate = tax(gross) / gross
+    const computeEffectiveTaxRate = (netAmount) => {
+      if (netAmount <= 0) return 0;
+      // Iterate to find gross withdrawal that yields netAmount after tax
+      let gross = netAmount * 1.25; // initial guess
+      for (let i = 0; i < 20; i++) {
+        const tax = calcTotalTax(gross, zip, 1);  // today's dollars, no inflation adjustment needed
+        const netFromGross = gross - tax;
+        if (Math.abs(netFromGross - netAmount) < 1) break;
+        gross = gross * (netAmount / Math.max(1, netFromGross));
+      }
+      const finalTax = calcTotalTax(gross, zip, 1);
+      return gross > 0 ? finalTax / gross : 0;
+    };
+
+    const autoTaxRate = fire.targetMode === "spending" && (fire.annualSpending || 0) > 0
+      ? computeEffectiveTaxRate(fire.annualSpending || 0)
+      : 0.15;
+    const taxRate = fire.withdrawalTaxMode === "manual"
+      ? (fire.withdrawalTaxRate || 0) / 100
+      : autoTaxRate;
+    const displayTaxPct = Math.round(taxRate * 1000) / 10; // one decimal
+    // Pension income (in today's dollars) reduces the portfolio withdrawal needed
+    const pensionAnnual = (retirement?.enabled && retirement?.pensionEnabled)
+      ? (retirement.pensionAmount || 0) : 0;
+    const partnerPensionAnnual = (retirement?.enabled && retirement?.partnerPensionEnabled)
+      ? (retirement.partnerPensionAmount || 0) : 0;
+    // Add SS to pension offset (both reduce portfolio need)
+    const FRA_FIRE = 67;
+    const ssBenefitFactorFire = (claimAge) => {
+      const m = (claimAge - FRA_FIRE) * 12;
+      if (m >= 0) return 1 + m * 0.08 / 12;
+      if (m >= -36) return 1 + m * (5/9) / 100;
+      return 1 + (-36) * (5/9) / 100 + (m + 36) * (5/12) / 100;
+    };
+    const ssAnnual = ss?.enabled ? (ssCalc.myBenefit || 0) * 12 * ssBenefitFactorFire(ss.claimAge || 67) : 0;
+    const partnerSSAnnual = (ss?.enabled && partner?.enabled) ? (ssCalc.partnerBenefit || 0) * 12 * ssBenefitFactorFire(ss.partnerClaimAge || 67) : 0;
+    const totalPensionIncome = pensionAnnual + partnerPensionAnnual + ssAnnual + partnerSSAnnual;
+    // Annual spending entered is after-tax. Pension is pre-tax — convert to after-tax equivalent.
+    const afterTaxPension = totalPensionIncome * (1 - taxRate);
+    // After-tax portfolio gap = what the portfolio must deliver after tax
+    const netSpendingAfterPension = fire.targetMode === "spending"
+      ? Math.max(0, (fire.annualSpending || 0) - afterTaxPension)
+      : null;
+    // Gross up the portfolio gap for withdrawal taxes
+    const grossSpending = fire.targetMode === "spending"
+      ? netSpendingAfterPension / Math.max(0.01, 1 - taxRate)
+      : null;
+    const targetNW = fire.targetMode === "spending"
+      ? grossSpending / ((fire.withdrawalRate || 4) / 100)
+      : (fire.targetNetWorth || 0);
+    // Run a 50-year projection for FIRE milestone searching (independent of chart horizon)
+    const fireProjection = runProjection({
+      currentNetWorth: netWorth, currentSalary: salary,
+      salaryGrowthMode: salaryMode, salaryGrowthPct, salarySteps,
+      monthlyRent: rent, rentGrowthMode: rentMode, rentGrowthPct, rentSteps,
+      monthlyOtherExpenses: otherExp, otherGrowthMode: otherMode, otherGrowthPct, otherSteps,
+      zip, zipMoves, investmentReturnPct: returnPct, inflationPct,
+      kids, projectionYears: 50,
+      partner, home, retirement, loans, uninvested,
+    });
+    const currentNWNow = fireProjection[0]?.investedNWReal ?? 0; // current invested real NW (excl. home equity + cash)
+
+    // Years to FIRE: find first year where real NW >= targetNW
+    let yearsToFire = null;
+    for (const d of fireProjection) {
+      if (d.investedNWReal >= targetNW) { yearsToFire = d.year; break; }
+    }
+
+    // CoastFIRE: how much do you need TODAY so it grows to targetNW by retireAge without contributions?
+    // coastNW = targetNW / (1 + realReturn)^(retireAge - currentAge)
+    const realReturnDecimal = ((1 + returnPct / 100) / (1 + inflationPct / 100) - 1);
+    // Use retirement tool ages if that tool is enabled
+    const effectiveCurrentAge = currentAge || 35;
+    const effectiveRetireAge  = retirement?.enabled ? (retirement.retireAge  || 65) : (fire.coastRetireAge || 65);
+    const yearsToRetire = Math.max(0, effectiveRetireAge - effectiveCurrentAge);
+    const coastTarget = targetNW / Math.pow(1 + realReturnDecimal, yearsToRetire);
+
+    // Years until CoastFIRE: find first year where real NW >= coastTarget
+    let yearsToCoast = null;
+    for (const d of fireProjection) {
+      if (d.investedNWReal >= coastTarget) { yearsToCoast = d.year; break; }
+    }
+
+    const alreadyFIRE = currentNWNow >= targetNW; // based on invested NW
+    const alreadyCoast = currentNWNow >= coastTarget;
+
+    // BaristaFIRE: part-time income covers some expenses, portfolio only needs to fund the gap
+    const baristaGapSpending = fire.targetMode === "spending"
+      ? Math.max(0, (fire.annualSpending || 0) - (fire.baristaIncome || 0))
+      : null;
+    const baristaGrossGap = baristaGapSpending != null
+      ? baristaGapSpending / Math.max(0.01, 1 - taxRate)
+      : null;
+    const baristaTargetNW = baristaGrossGap != null
+      ? baristaGrossGap / ((fire.withdrawalRate || 4) / 100)
+      : null;
+    let yearsToBaristaFire = null;
+    if (baristaTargetNW != null) {
+      const alreadyBarista = (fireProjection[0]?.investedNWReal ?? 0) >= baristaTargetNW;
+      if (alreadyBarista) yearsToBaristaFire = 0;
+      else for (const d of fireProjection) {
+        if (d.investedNWReal >= baristaTargetNW) { yearsToBaristaFire = d.year; break; }
+      }
+    }
+
+    return { targetNW, coastTarget, yearsToFire, yearsToCoast, alreadyFIRE, alreadyCoast, realReturnDecimal, yearsToRetire, grossSpending, baristaTargetNW, yearsToBaristaFire, baristaGapSpending, effectiveCurrentAge, effectiveRetireAge, totalPensionIncome, netSpendingAfterPension, taxRate, displayTaxPct };
+  }, [netWorth, salary, salaryMode, salaryGrowthPct, salarySteps,
+      rent, rentMode, rentGrowthPct, rentSteps,
+      otherExp, otherMode, otherGrowthPct, otherSteps,
+      zip, zipMoves, returnPct, inflationPct, kids,
+      partner, home, retirement, loans, uninvested, fire]);
+
+  // Compute SS benefits from salary data
+  const final = data[data.length - 1];
+  const cur   = data[0];
+  const stateRate = (STATE_TAX_BY_ZIP(zip) * 100).toFixed(1);
+  const realReturn = ((1 + returnPct / 100) / (1 + inflationPct / 100) - 1) * 100;
+
+  const CHART_TABS = [
+    { id: "networth",  label: "Net Worth" },
+    { id: "salary",    label: "Salary" },
+    { id: "expenses",  label: "Mo. Expenses" },
+    { id: "savings",   label: "Mo. Savings" },
+  ];
+
+  return (
+    <div style={{ fontFamily: "'IBM Plex Sans', system-ui, sans-serif", background: "#080b10", minHeight: "100vh", color: "#e8eaf0", padding: "24px 16px" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 5px; background: #080b10; }
+        ::-webkit-scrollbar-thumb { background: #1c1f2b; border-radius: 4px; }
+        input[type=number]::-webkit-inner-spin-button { opacity: 0.3; }
+      `}</style>
+
+      {/* ── Header ── */}
+      <div style={{ maxWidth: 1240, margin: "0 auto 24px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <h1 style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 26, fontWeight: 600, margin: "0 0 3px", letterSpacing: "-0.02em" }}>
+              <span style={{ color: "#4f8ef7" }}>nw</span><span style={{ color: "#374151" }}>.</span><span style={{ color: "#e8eaf0" }}>forecast</span>
+            </h1>
+            <p style={{ color: "#374151", fontSize: 12, margin: 0 }}>Tax-aware · Inflation-adjusted · S&P baseline</p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 10, color: "#374151", letterSpacing: "0.08em", textTransform: "uppercase" }}>Horizon:</span>
+              {[10, 20, 30, 40].map(y => (
+                <button key={y} onClick={() => setProjYears(y)} style={{
+                  padding: "5px 12px", borderRadius: 6, border: "1px solid",
+                  borderColor: projYears === y ? "#4f8ef7" : "#1c1f2b",
+                  background: projYears === y ? "rgba(79,142,247,0.12)" : "transparent",
+                  color: projYears === y ? "#4f8ef7" : "#4b5563",
+                  fontSize: 12, fontWeight: 700, cursor: "pointer",
+                }}>{y}y</button>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => { if (window.confirm("Reset all settings to defaults?")) resetAll(); }} style={{
+                padding: "5px 14px", borderRadius: 6, border: "1px solid #1c1f2b",
+                background: "rgba(248,113,113,0.08)", color: "#f87171",
+                fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: "0.05em",
+              }}>↺ Reset</button>
+              <button onClick={downloadSettings} style={{
+                padding: "5px 14px", borderRadius: 6, border: "1px solid #1c1f2b",
+                background: "rgba(79,142,247,0.08)", color: "#4f8ef7",
+                fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: "0.05em",
+              }}>⬇ Save</button>
+              <label style={{
+                padding: "5px 14px", borderRadius: 6, border: "1px solid #1c1f2b",
+                background: "rgba(52,211,153,0.08)", color: "#34d399",
+                fontSize: 11, fontWeight: 700, cursor: "pointer", letterSpacing: "0.05em",
+              }}>
+                ⬆ Load
+                <input type="file" accept=".json" onChange={loadSettings} style={{ display: "none" }} />
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: partner.enabled ? 1600 : 1240, margin: "0 auto", display: "grid", gridTemplateColumns: partner.enabled ? "680px 1fr" : "340px 1fr", gap: 18, alignItems: "start" }}>
+
+        {/* ── Left panel ── */}
+        <div style={{ background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 14, padding: "22px 18px", overflowY: "visible" }}>
+
+          {/* ── Student Loans ── */}
+          <Section title="Student Loans" icon="🎓"
+            info={{sections:[
+              {heading:"What this models",body:"Loan balance, interest rate, monthly payment, and forgiveness via PSLF. Payments are deducted from monthly savings each year."},
+              {heading:"IBR payments",body:"5%/10%/15% IBR options calculate income-driven payments from your salary using federal poverty line thresholds. Capped at the standard 10-year repayment amount."},
+              {heading:"Do not double-count",body:"Do not include loan balances in Current Net Worth, and do not include loan payments in Other Expenses — both are handled automatically here."},
+              {heading:"Limitations",body:"Does not model interest capitalization, income recertification, or tax on forgiven amounts (which may be taxable outside PSLF)."},
+            ]}}>
+            {(loans.enabled || loans.partnerEnabled) && (
+              <div style={{ background: "rgba(251,191,36,0.07)", border: "1px solid rgba(251,191,36,0.25)", borderRadius: 8, padding: "10px 12px", marginBottom: 14, fontSize: 11, color: "#fbbf24", lineHeight: 1.6 }}>
+                ⚠️ <strong>Avoid double-counting:</strong> Do <em>not</em> include loan balances in <strong>Current Net Worth</strong> (they are tracked here as liabilities), and do <em>not</em> include loan payments in <strong>Other Expenses</strong> (payments are modeled automatically below).
+              </div>
+            )}
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: loans.enabled || (partner.enabled && loans.partnerEnabled) ? 14 : 0 }}>
+              <input type="checkbox" checked={loans.enabled} onChange={e => updateLoans("enabled", e.target.checked)}
+                style={{ width: 14, height: 14, accentColor: "#f87171", cursor: "pointer" }} />
+              <span style={{ fontSize: 11, fontWeight: 700, color: loans.enabled ? "#f87171" : "#4b5563" }}>I have student loans</span>
+            </label>
+            {partner.enabled && (
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 14, marginTop: loans.enabled ? 8 : 0 }}>
+                <input type="checkbox" checked={loans.partnerEnabled} onChange={e => updateLoans("partnerEnabled", e.target.checked)}
+                  style={{ width: 14, height: 14, accentColor: "#fbbf24", cursor: "pointer" }} />
+                <span style={{ fontSize: 11, fontWeight: 700, color: loans.partnerEnabled ? "#fbbf24" : "#4b5563" }}>Partner has student loans</span>
+              </label>
+            )}
+            {(loans.enabled || (partner.enabled && loans.partnerEnabled)) && (
+              <div style={{ display: "grid", gridTemplateColumns: (partner.enabled && loans.enabled && loans.partnerEnabled) ? "1fr 1fr" : "1fr", gap: 12 }}>
+                {/* You */}
+                {loans.enabled && (
+                  <div>
+                    {partner.enabled && loans.partnerEnabled && <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4f8ef7", borderBottom: "1px solid #4f8ef722", paddingBottom: 6, marginBottom: 10 }}>You</div>}
+                    <Input label="Total Loan Balance" value={loans.amount} onChange={v => updateLoans("amount", v)} prefix="$" step={5000} />
+                    <Input label="Interest Rate %" value={loans.interestRate} onChange={v => updateLoans("interestRate", v)} suffix="%" step={0.125} min={0} />
+                    <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "10px 12px", marginBottom: 12 }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 6 }}>
+                        <input type="checkbox" checked={loans.includeInNetWorth !== false} onChange={e => updateLoans("includeInNetWorth", e.target.checked)}
+                          style={{ width: 13, height: 13, accentColor: "#4f8ef7", cursor: "pointer" }} />
+                        <span style={{ fontSize: 11, color: "#6b7280" }}>Include in net worth (as liability)</span>
+                      </label>
+                      <div style={{ fontSize: 10, color: "#374151", lineHeight: 1.5 }}>
+                        {loans.includeInNetWorth !== false ? "Loan balance subtracted from net worth" : "Loan balance hidden from net worth display"}
+                      </div>
+                    </div>
+                    {/* Monthly Payment — IBR options appear if PSLF is on */}
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ display: "flex", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, overflow: "hidden", marginBottom: 8 }}>
+                        {[["Manual", null], ["5% IBR", 5], ["10% IBR", 10], ["15% IBR", 15]].map(([label, val]) => (
+                          <button key={label} onClick={() => {
+                            updateLoans("ibrPct", val);
+                            if (val !== null) updateLoans("monthlyPayment", calcIBRPayment(salary, val));
+                          }} style={{
+                            flex: 1, padding: "6px 4px", border: "none", cursor: "pointer", fontSize: 10, fontWeight: 700,
+                            background: loans.ibrPct === val ? "rgba(52,211,153,0.15)" : "transparent",
+                            color: loans.ibrPct === val ? "#34d399" : "#4b5563",
+                          }}>{label}</button>
+                        ))}
+                      </div>
+                      {loans.ibrPct !== null && (
+                        <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 4, lineHeight: 1.5 }}>
+                          Based on ${salary.toLocaleString()} salary · {loans.ibrPct === 5 ? "SAVE (225% FPL)" : "IBR (150% FPL)"}
+                        </div>
+                      )}
+                      {loans.ibrPct !== null && (
+                        <div style={{ fontSize: 10, color: "#fbbf24", marginBottom: 6, lineHeight: 1.5 }}>
+                          ⚠️ Make sure your salary is entered correctly in the <strong>Baseline</strong> section below for an accurate IBR calculation.
+                        </div>
+                      )}
+                      <Input label="Monthly Payment"
+                        value={loans.ibrPct != null ? calcIBRPayment(salary, loans.ibrPct, loans.amount, loans.interestRate) : loans.monthlyPayment}
+                        onChange={v => { updateLoans("monthlyPayment", v); updateLoans("ibrPct", null); }}
+                        prefix="$" step={50} />
+                    </div>
+                    {/* PSLF */}
+                    <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "10px 12px", marginBottom: 4 }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: loans.pslfEnabled ? 10 : 0 }}>
+                        <input type="checkbox" checked={loans.pslfEnabled} onChange={e => { updateLoans("pslfEnabled", e.target.checked); if (!e.target.checked) updateLoans("ibrPct", null); }}
+                          style={{ width: 13, height: 13, accentColor: "#34d399", cursor: "pointer" }} />
+                        <span style={{ fontSize: 11, fontWeight: 700, color: loans.pslfEnabled ? "#34d399" : "#4b5563" }}>PSLF (Public Service Loan Forgiveness)</span>
+                      </label>
+                      {loans.pslfEnabled && (
+                        <div>
+                          <Input label="Years Until Forgiveness" value={loans.pslfYears} onChange={v => updateLoans("pslfYears", v)} step={1} min={1} max={20} suffix="yrs" />
+                          <div style={{ fontSize: 11, color: "#34d399", fontFamily: "monospace" }}>
+                            ~{fmt(projectedLoanBalance(loans.amount, loans.interestRate, loans.ibrPct != null ? calcIBRPayment(salary, loans.ibrPct, loans.amount, loans.interestRate) : loans.monthlyPayment, loans.pslfYears))} forgiven at year {loans.pslfYears}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {/* Partner */}
+                {partner.enabled && loans.partnerEnabled && (
+                  <div style={{ borderLeft: loans.enabled ? "1px solid #1c1f2b" : "none", paddingLeft: loans.enabled ? 12 : 0 }}>
+                    {loans.enabled && <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#fbbf24", borderBottom: "1px solid #fbbf2422", paddingBottom: 6, marginBottom: 10 }}>Partner</div>}
+                    <Input label="Total Loan Balance" value={loans.partnerAmount} onChange={v => updateLoans("partnerAmount", v)} prefix="$" step={5000} />
+                    <Input label="Interest Rate %" value={loans.partnerInterestRate} onChange={v => updateLoans("partnerInterestRate", v)} suffix="%" step={0.125} min={0} />
+                    <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "10px 12px", marginBottom: 12 }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 6 }}>
+                        <input type="checkbox" checked={loans.partnerIncludeInNetWorth !== false} onChange={e => updateLoans("partnerIncludeInNetWorth", e.target.checked)}
+                          style={{ width: 13, height: 13, accentColor: "#4f8ef7", cursor: "pointer" }} />
+                        <span style={{ fontSize: 11, color: "#6b7280" }}>Include in net worth (as liability)</span>
+                      </label>
+                      <div style={{ fontSize: 10, color: "#374151", lineHeight: 1.5 }}>
+                        {loans.partnerIncludeInNetWorth !== false ? "Loan balance subtracted from net worth" : "Loan balance hidden from net worth display"}
+                      </div>
+                    </div>
+                    {/* Monthly Payment — IBR options appear if PSLF is on */}
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ display: "flex", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, overflow: "hidden", marginBottom: 8 }}>
+                        {[["Manual", null], ["5% IBR", 5], ["10% IBR", 10], ["15% IBR", 15]].map(([label, val]) => (
+                          <button key={label} onClick={() => {
+                            updateLoans("partnerIbrPct", val);
+                            if (val !== null) updateLoans("partnerMonthlyPayment", calcIBRPayment(partner.salary, val));
+                          }} style={{
+                            flex: 1, padding: "6px 4px", border: "none", cursor: "pointer", fontSize: 10, fontWeight: 700,
+                            background: loans.partnerIbrPct === val ? "rgba(52,211,153,0.15)" : "transparent",
+                            color: loans.partnerIbrPct === val ? "#34d399" : "#4b5563",
+                          }}>{label}</button>
+                        ))}
+                      </div>
+                      {loans.partnerIbrPct !== null && (
+                        <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 4, lineHeight: 1.5 }}>
+                          Based on ${(partner.salary || 0).toLocaleString()} salary · {loans.partnerIbrPct === 5 ? "SAVE (225% FPL)" : "IBR (150% FPL)"}
+                        </div>
+                      )}
+                      {loans.partnerIbrPct !== null && (
+                        <div style={{ fontSize: 10, color: "#fbbf24", marginBottom: 6, lineHeight: 1.5 }}>
+                          ⚠️ Make sure your partner's salary is entered correctly in the <strong>Baseline</strong> section below for an accurate IBR calculation.
+                        </div>
+                      )}
+                      <Input label="Monthly Payment"
+                        value={loans.partnerIbrPct != null ? calcIBRPayment(partner.salary || 0, loans.partnerIbrPct, loans.partnerAmount, loans.partnerInterestRate) : loans.partnerMonthlyPayment}
+                        onChange={v => { updateLoans("partnerMonthlyPayment", v); updateLoans("partnerIbrPct", null); }}
+                        prefix="$" step={50} />
+                    </div>
+                    {/* PSLF */}
+                    <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "10px 12px", marginBottom: 4 }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: loans.partnerPslfEnabled ? 10 : 0 }}>
+                        <input type="checkbox" checked={loans.partnerPslfEnabled} onChange={e => { updateLoans("partnerPslfEnabled", e.target.checked); if (!e.target.checked) updateLoans("partnerIbrPct", null); }}
+                          style={{ width: 13, height: 13, accentColor: "#34d399", cursor: "pointer" }} />
+                        <span style={{ fontSize: 11, fontWeight: 700, color: loans.partnerPslfEnabled ? "#34d399" : "#4b5563" }}>PSLF (Public Service Loan Forgiveness)</span>
+                      </label>
+                      {loans.partnerPslfEnabled && (
+                        <div>
+                          <Input label="Years Until Forgiveness" value={loans.partnerPslfYears} onChange={v => updateLoans("partnerPslfYears", v)} step={1} min={1} max={20} suffix="yrs" />
+                          <div style={{ fontSize: 11, color: "#34d399", fontFamily: "monospace" }}>
+                            ~{fmt(projectedLoanBalance(loans.partnerAmount, loans.partnerInterestRate, loans.partnerIbrPct != null ? calcIBRPayment(partner.salary || 0, loans.partnerIbrPct, loans.partnerAmount, loans.partnerInterestRate) : loans.partnerMonthlyPayment, loans.partnerPslfYears))} forgiven at year {loans.partnerPslfYears}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </Section>
+
+          {/* ── Specialty Selector ── */}
+          <Section title="Specialty Selector" icon="🩺"
+            info={{sections:[
+              {heading:"What this does",body:"Pre-fills salary as $75K during residency, then steps up to median attending compensation at the end of training."},
+              {heading:"Data source",body:"Residency lengths and median salaries from Medscape Physician Compensation Report 2024. Figures are national medians — actual salaries vary widely by geography, practice setting, and experience."},
+              {heading:"How to use",body:"Select your specialty to get a reasonable starting point, then adjust the salary and step raise in the Salary Growth section to reflect your specific situation."},
+            ]}}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: specialtyEnabled ? 14 : 0 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={specialtyEnabled} onChange={e => {
+                  setSpecialtyEnabled(e.target.checked);
+                  if (!e.target.checked) applySpecialty(null);
+                }} style={{ width: 15, height: 15, accentColor: "#4f8ef7", cursor: "pointer" }} />
+                <span style={{ fontSize: 11, color: "#6b7280" }}>I am a physician — model my training salary</span>
+              </label>
+            </div>
+            {specialtyEnabled && (
+              <div>
+                <label style={{ display: "block", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", marginBottom: 6 }}>Specialty</label>
+                <select value={selectedSpecialty?.name || ""} onChange={e => applySpecialty(MEDICAL_SPECIALTIES.find(s => s.name === e.target.value) || null)}
+                  style={{ width: "100%", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 7, padding: "9px 11px", color: selectedSpecialty ? "#e8eaf0" : "#4b5563", fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", outline: "none", marginBottom: 12, cursor: "pointer" }}>
+                  <option value="">— Select a specialty —</option>
+                  {MEDICAL_SPECIALTIES.map(s => (
+                    <option key={s.name} value={s.name}>{s.name}</option>
+                  ))}
+                </select>
+                {selectedSpecialty && (
+                  <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "10px 12px", fontSize: 11 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <div><span style={{ color: "#4b5563" }}>Residency: </span><span style={{ color: "#fbbf24", fontFamily: "monospace", fontWeight: 700 }}>{selectedSpecialty.residencyYears} yrs</span></div>
+                      <div><span style={{ color: "#4b5563" }}>Training salary: </span><span style={{ color: "#e8eaf0", fontFamily: "monospace" }}>$75K/yr</span></div>
+                      <div style={{ gridColumn: "span 2" }}><span style={{ color: "#4b5563" }}>Attending salary: </span><span style={{ color: "#34d399", fontFamily: "monospace", fontWeight: 700 }}>${(selectedSpecialty.avgSalary / 1000).toFixed(0)}K/yr</span><span style={{ color: "#374151", fontSize: 10, marginLeft: 6 }}>median (Medscape 2024)</span></div>
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: 10, color: "#374151" }}>Salary Growth section set to step raise at year {selectedSpecialty.residencyYears}. Adjust freely.</div>
+                  </div>
+                )}
+              </div>
+            )}
+          </Section>
+
+          {/* ── Partner toggle bar ── */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, padding: "10px 12px", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 9 }}>
+            <span style={{ fontSize: 11, color: "#6b7280", flex: 1 }}>💍 Partner / Combined Finances</span>
+            <div style={{ display: "flex", background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 6, overflow: "hidden" }}>
+              {[["Solo", false], ["Add Partner", true]].map(([label, val]) => (
+                <button key={label} onClick={() => updatePartner("enabled", val)} style={{
+                  padding: "5px 12px", border: "none", cursor: "pointer", fontSize: 10, fontWeight: 700,
+                  background: partner.enabled === val ? (val ? "rgba(251,191,36,0.18)" : "rgba(79,142,247,0.12)") : "transparent",
+                  color: partner.enabled === val ? (val ? "#fbbf24" : "#4f8ef7") : "#4b5563",
+                }}>{label}</button>
+              ))}
+            </div>
+            {partner.enabled && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 10, color: "#4b5563" }}>from yr</span>
+                <input type="number" value={partner.marriageYear} min={0} onChange={e => updatePartner("marriageYear", parseInt(e.target.value) || 0)}
+                  style={{ width: 44, background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 6, padding: "4px 6px", color: "#fbbf24", fontSize: 12, fontFamily: "monospace", outline: "none", textAlign: "center" }} />
+              </div>
+            )}
+          </div>
+
+          {/* ── Baseline ── */}
+          <Section title="Baseline" icon="📊"
+            info={{sections:[
+              {heading:"Current Net Worth",body:"Enter liquid assets minus liabilities (excluding student loans if using that section). Includes savings, investments, retirement accounts. Does not include home equity — that is modeled separately in Property Purchase."},
+              {heading:"Annual Salary",body:"Enter gross (pre-tax) salary. Taxes are computed automatically using 2025 federal brackets, FICA, and your ZIP-based state rate."},
+              {heading:"Current Age",body:"Used to calculate Social Security benefits, retirement year, and CoastFIRE milestones throughout the app."},
+              {heading:"ZIP Code",body:"Used to estimate state income tax rate and cost-of-living multiplier for child costs. Does not affect rent — enter that directly."},
+            ]}}>
+            <div style={{ display: "grid", gridTemplateColumns: partner.enabled ? "1fr 1fr" : "1fr", gap: 12, alignItems: "start" }}>
+              <div>
+                {partner.enabled && <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4f8ef7", borderBottom: "1px solid #4f8ef722", paddingBottom: 8, marginBottom: 12 }}>You</div>}
+                <Input label="Current Age" value={currentAge} onChange={setCurrentAge} step={1} min={18} max={80} />
+                <Input label="Current Net Worth" value={netWorth} onChange={setNetWorth} prefix="$" step={1000} />
+                <Input label="Annual Salary (Gross)" value={salary} onChange={setSalary} prefix="$" step={1000} />
+              </div>
+              {partner.enabled && (
+                <div style={{ borderLeft: "1px solid #1c1f2b", paddingLeft: 12 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#fbbf24", borderBottom: "1px solid #fbbf2422", paddingBottom: 8, marginBottom: 12 }}>Partner</div>
+                  <Input label="Current Age" value={partnerAge} onChange={setPartnerAge} step={1} min={18} max={80} />
+                  <Input label="Current Net Worth" value={partner.netWorth} onChange={v => updatePartner("netWorth", v)} prefix="$" step={1000} />
+                  <Input label="Annual Salary (Gross)" value={partner.salary} onChange={v => updatePartner("salary", v)} prefix="$" step={1000} />
+                </div>
+              )}
+            </div>
+            {/* ZIP — always full-width, centered when partner enabled */}
+            <div style={{ marginTop: 12, maxWidth: partner.enabled ? "50%" : "100%", margin: "12px auto 0" }}>
+              <Input label={partner.enabled ? "ZIP Code (shared by both)" : "Starting ZIP Code"} value={zip} onChange={setZip} type="text" placeholder="e.g. 10001" />
+              <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "9px 11px", fontSize: 11, color: "#4b5563", textAlign: partner.enabled ? "center" : "left" }}>
+                State rate: <span style={{ color: "#fbbf24", fontFamily: "monospace" }}>{stateRate}%</span>
+                <span style={{ color: "#1f2937" }}> · COL {COL_MULTIPLIER_BY_ZIP(zip).toFixed(2)}×</span>
+              </div>
+            </div>
+          </Section>
+
+
+          {/* ── Salary Growth ── */}
+          <Section title="Salary Growth" icon="📈"
+            info={{sections:[
+              {heading:"% / Year mode",body:"Enter real growth above inflation. A 0% real raise means your salary keeps pace with CPI but doesn't grow in purchasing power. Nominal salary still rises each year."},
+              {heading:"Step Raises mode",body:"Enter amounts in today's dollars. COLA is applied automatically each year. Use this for known events like residency → attending transition."},
+              {heading:"Retirement",body:"At retirement year, salary drops to zero. Pension income (if enabled) is taxed as ordinary income but not subject to FICA."},
+            ]}}>
+            <div style={{ display: "grid", gridTemplateColumns: partner.enabled ? "1fr 1fr" : "1fr", gap: 12, alignItems: "start" }}>
+              <div>
+                {partner.enabled && <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4f8ef7", borderBottom: "1px solid #4f8ef722", paddingBottom: 8, marginBottom: 12 }}>You</div>}
+                <Toggle options={[{ value: "percentage", label: "% / Year" }, { value: "steps", label: "Step Raises" }]} value={salaryMode} onChange={setSalaryMode} />
+                {salaryMode === "percentage" ? (
+                  <Input label="Real Raise Above Inflation %" value={salaryGrowthPct} onChange={setSalaryGrowthPct} suffix="%" step={0.5} min={0} />
+                ) : (
+                  <div>
+                    <div style={{ fontSize: 10, color: "#374151", marginBottom: 8, lineHeight: 1.5 }}>Enter amounts in <span style={{ color: "#fbbf24" }}>today's dollars</span> — COLA applied automatically.</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 28px", gap: 5, marginBottom: 6 }}>
+                      {["Year", "New Salary", ""].map(h => <div key={h} style={{ fontSize: 9, color: "#374151", letterSpacing: "0.1em", textTransform: "uppercase" }}>{h}</div>)}
+                    </div>
+                    {salarySteps.map((st, i) => (
+                      <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 28px", gap: 5, marginBottom: 5 }}>
+                        <input type="number" value={st.year} onChange={e => updateSalaryStep(i, "year", parseInt(e.target.value))}
+                          style={{ background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, padding: "7px 9px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", width: "100%" }} />
+                        <input type="number" value={st.salary} onChange={e => updateSalaryStep(i, "salary", parseFloat(e.target.value))}
+                          style={{ background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, padding: "7px 9px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", width: "100%" }} />
+                        <button onClick={() => removeSalaryStep(i)} style={{ background: "transparent", border: "1px solid #1c1f2b", borderRadius: 6, color: "#f87171", cursor: "pointer", fontSize: 13 }}>×</button>
+                      </div>
+                    ))}
+                    <button onClick={addSalaryStep} style={{ width: "100%", padding: "7px", background: "transparent", border: "1px dashed #1c1f2b", borderRadius: 6, color: "#4f8ef7", fontSize: 11, cursor: "pointer", marginTop: 2 }}>+ Add Raise</button>
+                  </div>
+                )}
+              </div>
+              {partner.enabled && (
+                <div style={{ borderLeft: "1px solid #1c1f2b", paddingLeft: 12 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#fbbf24", borderBottom: "1px solid #fbbf2422", paddingBottom: 8, marginBottom: 12 }}>Partner</div>
+                  <Toggle options={[{ value: "percentage", label: "% / Year" }, { value: "steps", label: "Step Raises" }]} value={partner.salaryMode || "percentage"} onChange={v => updatePartner("salaryMode", v)} />
+                  {(partner.salaryMode || "percentage") === "percentage" ? (
+                    <Input label="Real Raise Above Inflation %" value={partner.salaryGrowthPct} onChange={v => updatePartner("salaryGrowthPct", v)} suffix="%" step={0.5} min={0} />
+                  ) : (
+                    <div>
+                      <div style={{ fontSize: 10, color: "#374151", marginBottom: 8, lineHeight: 1.5 }}>Enter amounts in <span style={{ color: "#fbbf24" }}>today's dollars</span> — COLA applied automatically.</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 28px", gap: 5, marginBottom: 6 }}>
+                        {["Year", "New Salary", ""].map(h => <div key={h} style={{ fontSize: 9, color: "#374151", letterSpacing: "0.1em", textTransform: "uppercase" }}>{h}</div>)}
+                      </div>
+                      {(partner.salarySteps || []).map((st, i) => (
+                        <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 28px", gap: 5, marginBottom: 5 }}>
+                          <input type="number" value={st.year} onChange={e => updatePartner("salarySteps", (partner.salarySteps || []).map((s, idx) => idx === i ? { ...s, year: parseInt(e.target.value) } : s))}
+                            style={{ background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, padding: "7px 9px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", width: "100%" }} />
+                          <input type="number" value={st.salary} onChange={e => updatePartner("salarySteps", (partner.salarySteps || []).map((s, idx) => idx === i ? { ...s, salary: parseFloat(e.target.value) } : s))}
+                            style={{ background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, padding: "7px 9px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", width: "100%" }} />
+                          <button onClick={() => updatePartner("salarySteps", (partner.salarySteps || []).filter((_, idx) => idx !== i))} style={{ background: "transparent", border: "1px solid #1c1f2b", borderRadius: 6, color: "#f87171", cursor: "pointer", fontSize: 13 }}>×</button>
+                        </div>
+                      ))}
+                      <button onClick={() => updatePartner("salarySteps", [...(partner.salarySteps || []), { year: ((partner.salarySteps || []).slice(-1)[0]?.year || 0) + 3, salary: partner.salary + 15000 }])}
+                        style={{ width: "100%", padding: "7px", background: "transparent", border: "1px dashed #1c1f2b", borderRadius: 6, color: "#4f8ef7", fontSize: 11, cursor: "pointer", marginTop: 2 }}>+ Add Raise</button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            {/* ── Retirement ── */}
+            <div style={{ borderTop: "1px solid #111827", marginTop: 16, paddingTop: 14 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: retirement.enabled ? 14 : 0 }}>
+                <input type="checkbox" checked={retirement.enabled} onChange={e => updateRetirement("enabled", e.target.checked)}
+                  style={{ width: 14, height: 14, accentColor: "#f87171", cursor: "pointer" }} />
+                <span style={{ fontSize: 11, fontWeight: 700, color: retirement.enabled ? "#f87171" : "#4b5563", letterSpacing: "0.05em" }}>Model Retirement</span>
+              </label>
+              {retirement.enabled && (
+                <div style={{ display: "grid", gridTemplateColumns: partner.enabled ? "1fr 1fr" : "1fr", gap: 12 }}>
+                  {/* You */}
+                  <div>
+                    {partner.enabled && <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4f8ef7", borderBottom: "1px solid #4f8ef722", paddingBottom: 6, marginBottom: 10 }}>You</div>}
+                    <Input label="Retirement Age" value={retirement.retireAge} onChange={v => updateRetirement("retireAge", v)} step={1} min={currentAge + 1} max={100} />
+                    {(() => {
+                      const yrsToRetire = Math.max(0, retirement.retireAge - currentAge);
+                      return <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 10, fontFamily: "monospace" }}>Retires in year {yrsToRetire}</div>;
+                    })()}
+
+                  </div>
+                  {/* Partner */}
+                  {partner.enabled && (
+                    <div style={{ borderLeft: "1px solid #1c1f2b", paddingLeft: 12 }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#fbbf24", borderBottom: "1px solid #fbbf2422", paddingBottom: 6, marginBottom: 10 }}>Partner</div>
+                      <Input label="Retirement Age" value={retirement.partnerRetireAge} onChange={v => updateRetirement("partnerRetireAge", v)} step={1} min={partnerAge + 1} max={100} />
+                      {(() => {
+                        const yrsToRetire = Math.max(0, retirement.partnerRetireAge - partnerAge);
+                        return <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 10, fontFamily: "monospace" }}>Retires in year {yrsToRetire}</div>;
+                      })()}
+
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </Section>
+
+          <Section title="Pension" icon="💰"
+            info={{sections:[
+              {heading:"What this models",body:"Defined benefit pension income starting at your chosen age. Independent of retirement — pension can start before or after you stop working."},
+              {heading:"Taxation",body:"Pension is taxed as ordinary income (federal + state) but is not subject to FICA/Social Security tax."},
+              {heading:"How to use",body:"Enter your expected annual pension in today's dollars. It inflates with CPI automatically. Does not model pension survivor benefits or cost-of-living adjustments beyond CPI."},
+            ]}}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: retirement.pensionEnabled ? 14 : 0 }}>
+              <input type="checkbox" checked={retirement.pensionEnabled} onChange={e => updateRetirement("pensionEnabled", e.target.checked)}
+                style={{ width: 14, height: 14, accentColor: "#fbbf24", cursor: "pointer" }} />
+              <span style={{ fontSize: 11, fontWeight: 700, color: retirement.pensionEnabled ? "#fbbf24" : "#4b5563" }}>Model Pension</span>
+            </label>
+            {retirement.pensionEnabled && (
+              <div style={{ display: "grid", gridTemplateColumns: partner.enabled ? "1fr 1fr" : "1fr", gap: 12 }}>
+                {/* You */}
+                <div>
+                  {partner.enabled && <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4f8ef7", borderBottom: "1px solid #4f8ef722", paddingBottom: 6, marginBottom: 10 }}>You</div>}
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: retirement.myPensionEnabled !== false ? 12 : 0 }}>
+                    <input type="checkbox" checked={retirement.myPensionEnabled !== false} onChange={e => updateRetirement("myPensionEnabled", e.target.checked)}
+                      style={{ width: 13, height: 13, accentColor: "#4f8ef7", cursor: "pointer" }} />
+                    <span style={{ fontSize: 11, color: retirement.myPensionEnabled !== false ? "#4f8ef7" : "#4b5563" }}>Include my pension</span>
+                  </label>
+                  {retirement.myPensionEnabled !== false && (
+                    <div>
+                      <Input label="Annual Amount (today's $)" value={retirement.pensionAmount} onChange={v => updateRetirement("pensionAmount", v)} prefix="$" step={1000} />
+                      <Input label="Pension Start Age" value={retirement.pensionStartAge} onChange={v => updateRetirement("pensionStartAge", v)} step={1} min={currentAge + 1} max={100} />
+                      {(() => {
+                        const yr = Math.max(0, (retirement.pensionStartAge || 65) - currentAge);
+                        return <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 10, fontFamily: "monospace" }}>Starts in year {yr} (age {retirement.pensionStartAge || 65})</div>;
+                      })()}
+                    </div>
+                  )}
+                </div>
+                {/* Partner */}
+                {partner.enabled && (
+                  <div style={{ borderLeft: "1px solid #1c1f2b", paddingLeft: 12 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#fbbf24", borderBottom: "1px solid #fbbf2422", paddingBottom: 6, marginBottom: 10 }}>Partner</div>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: retirement.partnerPensionEnabled ? 12 : 0 }}>
+                      <input type="checkbox" checked={retirement.partnerPensionEnabled} onChange={e => updateRetirement("partnerPensionEnabled", e.target.checked)}
+                        style={{ width: 13, height: 13, accentColor: "#fbbf24", cursor: "pointer" }} />
+                      <span style={{ fontSize: 11, color: retirement.partnerPensionEnabled ? "#fbbf24" : "#4b5563" }}>Include partner pension</span>
+                    </label>
+                    {retirement.partnerPensionEnabled && (
+                      <div>
+                        <Input label="Annual Amount (today's $)" value={retirement.partnerPensionAmount} onChange={v => updateRetirement("partnerPensionAmount", v)} prefix="$" step={1000} />
+                        <Input label="Pension Start Age" value={retirement.partnerPensionStartAge} onChange={v => updateRetirement("partnerPensionStartAge", v)} step={1} min={partnerAge + 1} max={100} />
+                        {(() => {
+                          const yr = Math.max(0, (retirement.partnerPensionStartAge || 65) - partnerAge);
+                          return <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 10, fontFamily: "monospace" }}>Starts in year {yr} (age {retirement.partnerPensionStartAge || 65})</div>;
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </Section>
+
+          <Section title="Social Security" icon="🏛️"
+            info={{sections:[
+              {heading:"What this models",body:"Social Security retirement benefit starting at your chosen claim age. Benefit is adjusted up or down from your Full Retirement Age (67) estimate using the SSA's actual formula."},
+              {heading:"Claim age",body:"Claiming at 62 reduces your benefit ~30%. Claiming at 70 increases it ~24% vs FRA. Every year of delay between 67–70 adds 8%."},
+              {heading:"Taxation",body:"Up to 85% of SS benefits are taxable as ordinary income at the federal level. This is modeled automatically."},
+              {heading:"How to estimate your benefit",body:"Check ssa.gov/myaccount for your personal estimate. The average SS retirement benefit in 2024 is ~$1,900/month at FRA."},
+              {heading:"FIRE calculator",body:"SS benefit is automatically factored into your FIRE number — it reduces how much your portfolio needs to generate."},
+            ]}}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: ss.enabled ? 14 : 0 }}>
+              <input type="checkbox" checked={ss.enabled} onChange={e => updateSS("enabled", e.target.checked)}
+                style={{ width: 14, height: 14, accentColor: "#4f8ef7", cursor: "pointer" }} />
+              <span style={{ fontSize: 11, fontWeight: 700, color: ss.enabled ? "#4f8ef7" : "#4b5563" }}>Include Social Security</span>
+            </label>
+            {ss.enabled && (
+              <div style={{ display: "grid", gridTemplateColumns: partner.enabled ? "1fr 1fr" : "1fr", gap: 12 }}>
+                {/* You */}
+                <div>
+                  {partner.enabled && <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4f8ef7", borderBottom: "1px solid #4f8ef722", paddingBottom: 6, marginBottom: 10 }}>You</div>}
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: ss.mySSEnabled !== false ? 12 : 0 }}>
+                    <input type="checkbox" checked={ss.mySSEnabled !== false} onChange={e => updateSS("mySSEnabled", e.target.checked)}
+                      style={{ width: 13, height: 13, accentColor: "#4f8ef7", cursor: "pointer" }} />
+                    <span style={{ fontSize: 11, color: ss.mySSEnabled !== false ? "#4f8ef7" : "#4b5563" }}>Include my Social Security</span>
+                  </label>
+                  {ss.mySSEnabled !== false && (
+                    <div>
+                      <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "9px 11px", fontSize: 11, marginBottom: 12 }}>
+                        <span style={{ color: "#4b5563" }}>Estimated benefit at FRA: </span>
+                        <span style={{ color: "#4f8ef7", fontFamily: "monospace", fontWeight: 700 }}>${ssCalc.myBenefit.toLocaleString()}/mo</span>
+                        <div style={{ fontSize: 10, color: "#374151", marginTop: 4 }}>Based on current salary & growth · check ssa.gov/myaccount for your actual estimate</div>
+                      </div>
+                      <div style={{ marginBottom: 12 }}>
+                        <label style={{ display: "block", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", marginBottom: 6 }}>Claim Age</label>
+                        <div style={{ display: "flex", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, overflow: "hidden", marginBottom: 8 }}>
+                          {[[62,"−30%"],[67,"FRA"],[70,"+24%"]].map(([age, label]) => (
+                            <button key={age} onClick={() => updateSS("claimAge", age)} style={{
+                              flex: 1, padding: "6px 4px", border: "none", cursor: "pointer", fontSize: 10, fontWeight: 700,
+                              background: ss.claimAge === age ? "rgba(79,142,247,0.15)" : "transparent",
+                              color: ss.claimAge === age ? "#4f8ef7" : "#4b5563",
+                            }}>{age} <span style={{ fontSize: 9, opacity: 0.7 }}>({label})</span></button>
+                          ))}
+                        </div>
+                        {(() => {
+                          const FRA = 67; const m = (ss.claimAge - FRA) * 12;
+                          const factor = m >= 0 ? 1 + m*0.08/12 : m >= -36 ? 1 + m*(5/9)/100 : 1 + (-36)*(5/9)/100 + (m+36)*(5/12)/100;
+                          const adjBenefit = Math.round(ssCalc.myBenefit * factor);
+                          return (
+                            <div style={{ fontSize: 11, color: "#6b7280" }}>
+                              Adjusted benefit: <span style={{ color: factor >= 1 ? "#34d399" : "#f87171", fontFamily: "monospace", fontWeight: 700 }}>${adjBenefit.toLocaleString()}/mo</span>
+                              <span style={{ color: "#374151" }}> ({(factor*100-100).toFixed(1)}% vs FRA)</span>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                      <div style={{ fontSize: 10, color: "#374151" }}>
+                        Starts in year {Math.max(0, ss.claimAge - currentAge)} (age {ss.claimAge})
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {/* Partner */}
+                {partner.enabled && (
+                  <div style={{ borderLeft: "1px solid #1c1f2b", paddingLeft: 12 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#fbbf24", borderBottom: "1px solid #fbbf2422", paddingBottom: 6, marginBottom: 10 }}>Partner</div>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: ss.partnerSSEnabled ? 12 : 0 }}>
+                      <input type="checkbox" checked={ss.partnerSSEnabled || false} onChange={e => updateSS("partnerSSEnabled", e.target.checked)}
+                        style={{ width: 13, height: 13, accentColor: "#fbbf24", cursor: "pointer" }} />
+                      <span style={{ fontSize: 11, color: ss.partnerSSEnabled ? "#fbbf24" : "#4b5563" }}>Include partner Social Security</span>
+                    </label>
+                    {ss.partnerSSEnabled && (
+                      <div>
+                        <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "9px 11px", fontSize: 11, marginBottom: 12 }}>
+                          <span style={{ color: "#4b5563" }}>Estimated benefit at FRA: </span>
+                          <span style={{ color: "#fbbf24", fontFamily: "monospace", fontWeight: 700 }}>${ssCalc.partnerBenefit.toLocaleString()}/mo</span>
+                          <div style={{ fontSize: 10, color: "#374151", marginTop: 4 }}>Based on partner's salary & growth · check ssa.gov/myaccount for their actual estimate</div>
+                        </div>
+                        <div style={{ marginBottom: 12 }}>
+                          <label style={{ display: "block", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", marginBottom: 6 }}>Claim Age</label>
+                          <div style={{ display: "flex", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, overflow: "hidden", marginBottom: 8 }}>
+                            {[[62,"−30%"],[67,"FRA"],[70,"+24%"]].map(([age, label]) => (
+                              <button key={age} onClick={() => updateSS("partnerClaimAge", age)} style={{
+                                flex: 1, padding: "6px 4px", border: "none", cursor: "pointer", fontSize: 10, fontWeight: 700,
+                                background: ss.partnerClaimAge === age ? "rgba(251,191,36,0.15)" : "transparent",
+                                color: ss.partnerClaimAge === age ? "#fbbf24" : "#4b5563",
+                              }}>{age} <span style={{ fontSize: 9, opacity: 0.7 }}>({label})</span></button>
+                            ))}
+                          </div>
+                          {(() => {
+                            const FRA = 67; const m = (ss.partnerClaimAge - FRA) * 12;
+                            const factor = m >= 0 ? 1 + m*0.08/12 : m >= -36 ? 1 + m*(5/9)/100 : 1 + (-36)*(5/9)/100 + (m+36)*(5/12)/100;
+                            const adjBenefit = Math.round(ssCalc.partnerBenefit * factor);
+                            return (
+                              <div style={{ fontSize: 11, color: "#6b7280" }}>
+                                Adjusted benefit: <span style={{ color: factor >= 1 ? "#34d399" : "#f87171", fontFamily: "monospace", fontWeight: 700 }}>${adjBenefit.toLocaleString()}/mo</span>
+                                <span style={{ color: "#374151" }}> ({(factor*100-100).toFixed(1)}% vs FRA)</span>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                        <div style={{ fontSize: 10, color: "#374151" }}>
+                          Starts in year {Math.max(0, ss.partnerClaimAge - partnerAge)} (age {ss.partnerClaimAge})
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </Section>
+
+          {/* ── Monthly Expenses ── */}
+          <Section title="Monthly Expenses" icon="💸"
+            info={{sections:[
+              {heading:"What to include",body:"Rent/mortgage + other living expenses (food, utilities, transportation, subscriptions, etc.). Do not include loan payments or savings — those are modeled separately."},
+              {heading:"Inflation",body:"All expenses inflate at CPI automatically. Enter real growth above inflation only if you expect expenses to outpace inflation (e.g. lifestyle creep)."},
+              {heading:"Partner expenses",body:"Enter the partner's additional expenses — the model adds them to household totals from the marriage year onward."},
+            ]}}>
+            {/* Column headers — only shown when partner enabled */}
+            {partner.enabled && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4f8ef7", borderBottom: "1px solid #4f8ef722", paddingBottom: 8 }}>You</div>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#fbbf24", borderBottom: "1px solid #fbbf2422", paddingBottom: 8, paddingLeft: 12, borderLeft: "1px solid #1c1f2b" }}>Partner (Additional)</div>
+              </div>
+            )}
+
+            {/* Rent / Mortgage row */}
+            <div style={{ display: "grid", gridTemplateColumns: partner.enabled ? "1fr 1fr" : "1fr", gap: 0, alignItems: "start", marginBottom: 0 }}>
+              <div style={{ paddingRight: partner.enabled ? 12 : 0 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "#6b7280", marginBottom: 8 }}>Rent / Mortgage</div>
+                <div style={{ fontSize: 10, color: "#374151", marginBottom: 8, lineHeight: 1.5 }}>Inflation applied automatically. Enter step amounts in <span style={{ color: "#fbbf24" }}>today's dollars</span>.</div>
+                <Input label="Current Monthly Amount" value={rent} onChange={setRent} prefix="$" step={100} />
+                <Toggle options={[{ value: "percentage", label: "% / Year" }, { value: "steps", label: "Step Changes" }]} value={rentMode} onChange={setRentMode} />
+                {rentMode === "percentage" ? (
+                  <Input label="Real Growth Above Inflation %" value={rentGrowthPct} onChange={setRentGrowthPct} suffix="%" step={0.5} min={0} />
+                ) : (
+                  <StepEditor steps={rentSteps} setSteps={setRentSteps} valueLabel="New Amount" valueField="amount" defaultValue={rent + 400} />
+                )}
+              </div>
+              {partner.enabled && (
+                <div style={{ borderLeft: "1px solid #1c1f2b", paddingLeft: 12 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "#6b7280", marginBottom: 8 }}>Rent / Mortgage</div>
+                  <div style={{ fontSize: 10, color: "#374151", marginBottom: 8, lineHeight: 1.5 }}>Inflation applied automatically. Enter step amounts in <span style={{ color: "#fbbf24" }}>today's dollars</span>.</div>
+                  <Input label="Current Monthly Amount" value={partner.rent} onChange={v => updatePartner("rent", v)} prefix="$" step={100} />
+                  <Toggle options={[{ value: "percentage", label: "% / Year" }, { value: "steps", label: "Step Changes" }]} value={partner.rentMode || "percentage"} onChange={v => updatePartner("rentMode", v)} />
+                  {(partner.rentMode || "percentage") === "percentage" ? (
+                    <Input label="Real Growth Above Inflation %" value={partner.rentGrowthPct} onChange={v => updatePartner("rentGrowthPct", v)} suffix="%" step={0.5} min={0} />
+                  ) : (
+                    <StepEditor steps={partner.rentSteps || []} setSteps={v => updatePartner("rentSteps", v)} valueLabel="New Amount" valueField="amount" defaultValue={(partner.rent || 0) + 200} />
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div style={{ height: 1, background: "#111827", margin: "14px 0" }} />
+
+            {/* Other Expenses row */}
+            <div style={{ display: "grid", gridTemplateColumns: partner.enabled ? "1fr 1fr" : "1fr", gap: 0, alignItems: "start" }}>
+              <div style={{ paddingRight: partner.enabled ? 12 : 0 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "#6b7280", marginBottom: 8 }}>Other Expenses</div>
+                <div style={{ fontSize: 10, color: "#374151", marginBottom: 8, lineHeight: 1.5 }}>Inflation applied automatically. Enter step amounts in <span style={{ color: "#fbbf24" }}>today's dollars</span>.</div>
+                <Input label="Current Monthly Amount" value={otherExp} onChange={setOtherExp} prefix="$" step={100} />
+                <Toggle options={[{ value: "percentage", label: "% / Year" }, { value: "steps", label: "Step Changes" }]} value={otherMode} onChange={setOtherMode} />
+                {otherMode === "percentage" ? (
+                  <Input label="Real Growth Above Inflation %" value={otherGrowthPct} onChange={setOtherGrowthPct} suffix="%" step={0.5} min={0} />
+                ) : (
+                  <StepEditor steps={otherSteps} setSteps={setOtherSteps} valueLabel="New Amount" valueField="amount" defaultValue={otherExp + 400} />
+                )}
+              </div>
+              {partner.enabled && (
+                <div style={{ borderLeft: "1px solid #1c1f2b", paddingLeft: 12 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "#6b7280", marginBottom: 8 }}>Other Expenses</div>
+                  <div style={{ fontSize: 10, color: "#374151", marginBottom: 8, lineHeight: 1.5 }}>Inflation applied automatically. Enter step amounts in <span style={{ color: "#fbbf24" }}>today's dollars</span>.</div>
+                  <Input label="Current Monthly Amount" value={partner.otherExp} onChange={v => updatePartner("otherExp", v)} prefix="$" step={50} />
+                  <Toggle options={[{ value: "percentage", label: "% / Year" }, { value: "steps", label: "Step Changes" }]} value={partner.otherMode || "percentage"} onChange={v => updatePartner("otherMode", v)} />
+                  {(partner.otherMode || "percentage") === "percentage" ? (
+                    <Input label="Real Growth Above Inflation %" value={partner.otherGrowthPct} onChange={v => updatePartner("otherGrowthPct", v)} suffix="%" step={0.5} min={0} />
+                  ) : (
+                    <StepEditor steps={partner.otherSteps || []} setSteps={v => updatePartner("otherSteps", v)} valueLabel="New Amount" valueField="amount" defaultValue={(partner.otherExp || 0) + 200} />
+                  )}
+                </div>
+              )}
+            </div>
+          </Section>
+
+          <Section title="Investment Return" icon="💹"
+            info={{sections:[
+              {heading:"Nominal vs real",body:"Enter nominal (before inflation) annual return. The real return shown below accounts for inflation drag. S&P 500 historical nominal average is ~10.5% (1928–2024)."},
+              {heading:"Uninvested cash",body:"The emergency fund / cash reserve earns inflation only (like a HYSA). This drag compounds significantly over long horizons."},
+              {heading:"Limitations",body:"The model applies a single blended return to all invested assets. It does not model asset allocation, sequence-of-returns risk, or bond/equity splits."},
+            ]}}>
+            <Input label="Nominal Annual Return" value={returnPct} onChange={setReturnPct} suffix="%" step={0.5} min={0} />
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 12 }}>
+              {[{ l: "Conservative", v: 7 }, { l: "S&P Hist.", v: 10.5 }, { l: "Aggressive", v: 13 }].map(p => (
+                <button key={p.l} onClick={() => setReturnPct(p.v)} style={{
+                  flex: "1 0 auto", padding: "5px 8px", borderRadius: 6, border: "1px solid",
+                  borderColor: returnPct === p.v ? "#4f8ef7" : "#1c1f2b",
+                  background: returnPct === p.v ? "rgba(79,142,247,0.1)" : "transparent",
+                  color: returnPct === p.v ? "#4f8ef7" : "#4b5563",
+                  fontSize: 10, cursor: "pointer", fontWeight: 700,
+                }}>{p.l} ({p.v}%)</button>
+              ))}
+            </div>
+            <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "9px 11px", fontSize: 11 }}>
+              <span style={{ color: "#4b5563" }}>Real return (after inflation): </span>
+              <span style={{ color: realReturn > 0 ? "#34d399" : "#f87171", fontFamily: "monospace", fontWeight: 700 }}>
+                {realReturn.toFixed(1)}%
+              </span>
+            </div>
+            <div style={{ borderTop: "1px solid #111827", marginTop: 14, paddingTop: 14 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: uninvested.enabled ? 12 : 0 }}>
+                <input type="checkbox" checked={uninvested.enabled} onChange={e => updateUninvested("enabled", e.target.checked)}
+                  style={{ width: 14, height: 14, accentColor: "#fbbf24", cursor: "pointer" }} />
+                <span style={{ fontSize: 11, fontWeight: 700, color: uninvested.enabled ? "#fbbf24" : "#4b5563" }}>Set aside uninvested cash</span>
+              </label>
+              {uninvested.enabled && (
+                <div>
+                  <div style={{ fontSize: 10, color: "#374151", marginBottom: 10, lineHeight: 1.5 }}>
+                    This amount earns inflation only (e.g. emergency fund, HYSA). The rest is invested at your return rate above.
+                  </div>
+                  <Toggle options={[{ value: "fixed", label: "Fixed $" }, { value: "percentage", label: "% of NW" }]} value={uninvested.mode} onChange={v => updateUninvested("mode", v)} />
+                  {uninvested.mode === "fixed"
+                    ? <Input label="Uninvested Amount (today's $)" value={uninvested.amount} onChange={v => updateUninvested("amount", v)} prefix="$" step={1000} />
+                    : <Input label="Uninvested % of Net Worth" value={uninvested.pct} onChange={v => updateUninvested("pct", v)} suffix="%" step={1} min={0} max={100} />
+                  }
+                </div>
+              )}
+            </div>
+          </Section>
+
+          <Section title="Inflation Scenario" icon="📉"
+            info={{sections:[
+              {heading:"What inflation affects",body:"All expenses, salary (via COLA), tax brackets, standard deductions, and the real vs nominal distinction throughout the model."},
+              {heading:"Presets",body:"Conservative (2%) = Fed target. Historical Avg (3.1%) = US CPI average since 1926. Elevated (5%) = 1970s-style persistent inflation."},
+              {heading:"Real values",body:"Switching the chart to 'Real' shows everything in today's purchasing power, making comparisons across time meaningful."},
+            ]}}>
+            <Input label="Annual Inflation Rate" value={inflationPct} onChange={v => { setCustomInflation(v); setUseCustomInflation(true); }} suffix="%" step={0.1} min={0} />
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 12 }}>
+              {Object.entries(INFLATION_PRESETS).map(([key, preset]) => (
+                <button key={key} onClick={() => { setInflationKey(key); setUseCustomInflation(false); }} style={{
+                  flex: "1 0 auto", padding: "5px 8px", borderRadius: 6, border: "1px solid",
+                  borderColor: !useCustomInflation && inflationKey === key ? "#4f8ef7" : "#1c1f2b",
+                  background: !useCustomInflation && inflationKey === key ? "rgba(79,142,247,0.1)" : "transparent",
+                  color: !useCustomInflation && inflationKey === key ? "#4f8ef7" : "#4b5563",
+                  fontSize: 10, cursor: "pointer", fontWeight: 700,
+                }}>{preset.label} ({preset.pct}%)</button>
+              ))}
+            </div>
+          </Section>
+
+          <Section title="Property Purchase" icon="🏠"
+            info={{sections:[
+              {heading:"What this models",body:"Down payment (deducted from liquid NW), fixed-rate mortgage amortization, property tax, HOA, and appreciation. Home equity is tracked separately from liquid NW."},
+              {heading:"Assumptions",body:"Fixed interest rate for the full term. Property tax is based on ZIP-code state averages — actual rates vary by municipality. Appreciation is a straight-line annual rate."},
+              {heading:"Family gift",body:"Gift amount is excluded from liquid NW deduction — it comes from an outside source."},
+              {heading:"Limitations",body:"Does not model PMI, refinancing, selling costs, maintenance/repair costs, or tax deductibility of mortgage interest."},
+            ]}}>
+            <div style={{ display: "flex", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 7, overflow: "hidden", marginBottom: 14 }}>
+              {[["Renting", false], ["Buy Property", true]].map(([label, val]) => (
+                <button key={label} onClick={() => updateHome("enabled", val)} style={{
+                  flex: 1, padding: "8px", border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700,
+                  background: home.enabled === val ? (val ? "rgba(52,211,153,0.15)" : "rgba(79,142,247,0.1)") : "transparent",
+                  color: home.enabled === val ? (val ? "#34d399" : "#4f8ef7") : "#4b5563",
+                }}>{label}</button>
+              ))}
+            </div>
+            {home.enabled && (
+              <div>
+                <Input label="Purchase in year #" value={home.purchaseYear} onChange={v => updateHome("purchaseYear", v)} min={0} step={1} />
+                <Input label="Purchase Price" value={home.purchasePrice} onChange={v => updateHome("purchasePrice", v)} prefix="$" step={10000} />
+                <Input label="Down Payment %" value={home.downPct} onChange={v => updateHome("downPct", v)} suffix="%" step={1} min={0} max={100} />
+                <div style={{ background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 7, padding: "10px 12px", marginBottom: 13 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: home.familyGiftEnabled ? 10 : 0 }}>
+                    <input type="checkbox" checked={home.familyGiftEnabled} onChange={e => updateHome("familyGiftEnabled", e.target.checked)}
+                      style={{ width: 13, height: 13, accentColor: "#34d399", cursor: "pointer" }} />
+                    <span style={{ fontSize: 11, fontWeight: 700, color: home.familyGiftEnabled ? "#34d399" : "#4b5563" }}>Family Assistance (Gift)</span>
+                  </label>
+                  {home.familyGiftEnabled && (
+                    <div>
+                      <Input label="Gift Amount Toward Down Payment" value={home.familyGiftAmount} onChange={v => updateHome("familyGiftAmount", v)} prefix="$" step={5000} />
+                      {(() => {
+                        const downAmt = home.purchasePrice * home.downPct / 100;
+                        const gift = Math.min(home.familyGiftAmount || 0, downAmt);
+                        const outOfPocket = downAmt - gift;
+                        return (
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 11, marginTop: 4 }}>
+                            <div><span style={{ color: "#4b5563" }}>Gift covers: </span><span style={{ color: "#34d399", fontFamily: "monospace" }}>{fmt(gift)}</span></div>
+                            <div><span style={{ color: "#4b5563" }}>Your cost: </span><span style={{ color: "#fbbf24", fontFamily: "monospace" }}>{fmt(outOfPocket)}</span></div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+                <Input label="Mortgage Term (years)" value={home.termYears} onChange={v => updateHome("termYears", v)} min={5} step={5} />
+                <Input label="Interest Rate %" value={home.interestRate} onChange={v => updateHome("interestRate", v)} suffix="%" step={0.125} min={0} />
+                <Input label="Annual Appreciation %" value={home.appreciationPct} onChange={v => updateHome("appreciationPct", v)} suffix="%" step={0.5} min={0} />
+                <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "9px 11px", fontSize: 11, marginBottom: 4 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <span style={{ color: "#4b5563" }}>Property Tax Rate</span>
+                    <button onClick={() => updateHome("taxRate", home.taxRate != null ? null : parseFloat((PROPERTY_TAX_BY_ZIP(zip) * 100).toFixed(2)))}
+                      style={{ background: "transparent", border: "1px solid #1c1f2b", borderRadius: 5, color: "#4f8ef7", fontSize: 9, padding: "3px 8px", cursor: "pointer", fontWeight: 700, letterSpacing: "0.05em" }}>
+                      {home.taxRate != null ? "AUTO" : "CUSTOM"}
+                    </button>
+                  </div>
+                  {home.taxRate != null ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <input type="number" value={home.taxRate} step={0.05} min={0}
+                        onChange={e => updateHome("taxRate", parseFloat(e.target.value) || 0)}
+                        style={{ flex: 1, background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 6, padding: "6px 9px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none" }} />
+                      <span style={{ color: "#6b7280", fontSize: 12 }}>%/yr</span>
+                    </div>
+                  ) : (
+                    <div style={{ color: "#fbbf24", fontFamily: "monospace", fontSize: 12 }}>
+                      {(PROPERTY_TAX_BY_ZIP(zip) * 100).toFixed(2)}%
+                      <span style={{ color: "#374151", fontSize: 10, marginLeft: 8 }}>based on ZIP {zip}</span>
+                    </div>
+                  )}
+                </div>
+                <Input label="Monthly HOA Fee" value={home.hoaFee} onChange={v => updateHome("hoaFee", v)} prefix="$" step={50} />
+                {(() => {
+                  const principal = home.purchasePrice * (1 - home.downPct / 100);
+                  const r = home.interestRate / 100 / 12;
+                  const n = home.termYears * 12;
+                  const pmt = r === 0 ? principal / n : principal * r * Math.pow(1 + r, n) / (Math.pow(1 + r, n) - 1);
+                  const down = home.purchasePrice * home.downPct / 100;
+                  return (
+                    <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "10px 12px", fontSize: 11, marginTop: 4 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                        <div><span style={{ color: "#4b5563" }}>Down payment: </span><span style={{ color: "#fbbf24", fontFamily: "monospace" }}>{fmt(down)}</span></div>
+                        <div><span style={{ color: "#4b5563" }}>Principal: </span><span style={{ color: "#e8eaf0", fontFamily: "monospace" }}>{fmt(principal)}</span></div>
+                        <div><span style={{ color: "#4b5563" }}>P&I payment: </span><span style={{ color: "#e8eaf0", fontFamily: "monospace" }}>{fmt(pmt)}</span></div>
+                        <div><span style={{ color: "#4b5563" }}>Property tax: </span><span style={{ color: "#e8eaf0", fontFamily: "monospace" }}>{fmt(home.purchasePrice * (home.taxRate != null ? home.taxRate / 100 : PROPERTY_TAX_BY_ZIP(zip)) / 12)}/mo</span></div>
+                        <div><span style={{ color: "#4b5563" }}>HOA: </span><span style={{ color: "#e8eaf0", fontFamily: "monospace" }}>{fmt(home.hoaFee || 0)}/mo</span></div>
+                        <div><span style={{ color: "#4b5563" }}>Total mo. cost: </span><span style={{ color: "#34d399", fontFamily: "monospace" }}>{fmt(pmt + home.purchasePrice * (home.taxRate != null ? home.taxRate / 100 : PROPERTY_TAX_BY_ZIP(zip)) / 12 + (home.hoaFee || 0))}</span></div>
+                        <div style={{ gridColumn: "span 2" }}><span style={{ color: "#4b5563" }}>Total interest: </span><span style={{ color: "#f87171", fontFamily: "monospace" }}>{fmt(pmt * n - principal)}</span></div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </Section>
+
+          <Section title="Kids" icon="👶"
+            info={{sections:[
+              {heading:"Auto mode",body:"Uses ZIP-indexed cost estimates based on USDA child expenditure data: ~$2,200/mo infant, $1,800/mo toddler, $1,100/mo school age, $1,300/mo teen. All inflate with CPI."},
+              {heading:"Custom phases",body:"Enter amounts in today's dollars for each phase. Costs drop to $0 after all phases unless College support is enabled."},
+              {heading:"College",body:"Enter annual cost in today's dollars. Inflates with CPI. Does not model 529 plans, financial aid, or scholarships."},
+              {heading:"Limitations",body:"Child costs are highly variable. These are national averages — actual costs depend on childcare, private vs public school, activities, and lifestyle."},
+            ]}}>
+            <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "9px 11px", fontSize: 11, marginBottom: 12 }}>
+              <span style={{ color: "#4b5563" }}>ZIP {zip} COL: </span>
+              <span style={{ color: COL_MULTIPLIER_BY_ZIP(zip) > 1.5 ? "#f87171" : COL_MULTIPLIER_BY_ZIP(zip) > 1.1 ? "#fbbf24" : COL_MULTIPLIER_BY_ZIP(zip) < 0.9 ? "#34d399" : "#9ca3af", fontFamily: "monospace", fontWeight: 700 }}>
+                {COL_MULTIPLIER_BY_ZIP(zip).toFixed(2)}×
+              </span>
+              <span style={{ color: "#374151", marginLeft: 6 }}>· Auto: {fmt(childCostPerMonth(0, COL_MULTIPLIER_BY_ZIP(zip)))}/mo infant · {fmt(childCostPerMonth(8, COL_MULTIPLIER_BY_ZIP(zip)))}/mo school · {fmt(childCostPerMonth(15, COL_MULTIPLIER_BY_ZIP(zip)))}/mo teen</span>
+            </div>
+            {kids.map(k => {
+              const updateKid = (field, val) => setKids(ks => ks.map(c => c.id === k.id ? { ...c, [field]: val } : c));
+              const updatePhase = (i, field, val) => setKids(ks => ks.map(c => c.id === k.id ? { ...c, phases: c.phases.map((p, idx) => idx === i ? { ...p, [field]: val } : p) } : c));
+              const addPhase = () => setKids(ks => ks.map(c => c.id === k.id ? { ...c, phases: [...c.phases, { years: 5, amount: 1000 }] } : c));
+              const removePhase = (i) => setKids(ks => ks.map(c => c.id === k.id ? { ...c, phases: c.phases.filter((_, idx) => idx !== i) } : c));
+              return (
+                <div key={k.id} style={{ background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 8, padding: "12px", marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <span style={{ fontSize: 12, fontFamily: "monospace", color: "#e8eaf0", fontWeight: 600 }}>Child born year {k.birthYear}</span>
+                    <button onClick={() => removeKid(k.id)} style={{ background: "transparent", border: "none", color: "#f87171", cursor: "pointer", fontSize: 15, lineHeight: 1 }}>×</button>
+                  </div>
+                  {/* Cost mode toggle */}
+                  <div style={{ display: "flex", background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 6, overflow: "hidden", marginBottom: 10 }}>
+                    {["auto", "custom"].map(mode => (
+                      <button key={mode} onClick={() => updateKid("costMode", mode)} style={{
+                        flex: 1, padding: "6px 8px", border: "none", cursor: "pointer", fontSize: 10, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
+                        background: k.costMode === mode ? "#4f8ef7" : "transparent",
+                        color: k.costMode === mode ? "#fff" : "#6b7280", transition: "all 0.15s",
+                      }}>{mode === "auto" ? "Auto (ZIP-indexed)" : "Custom Phases"}</button>
+                    ))}
+                  </div>
+                  {k.costMode === "auto" ? (
+                    <div style={{ fontSize: 10, color: "#374151" }}>
+                      Using ZIP-indexed defaults · amounts inflate with CPI
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={{ fontSize: 10, color: "#374151", marginBottom: 8, lineHeight: 1.5 }}>
+                        Amounts in <span style={{ color: "#fbbf24" }}>today's dollars</span>, inflate with CPI. Costs drop to $0 after all phases.
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 28px", gap: 5, marginBottom: 5 }}>
+                        {["Years", "$/mo", ""].map(h => <div key={h} style={{ fontSize: 9, color: "#374151", letterSpacing: "0.08em", textTransform: "uppercase" }}>{h}</div>)}
+                      </div>
+                      {k.phases.map((phase, i) => (
+                        <div key={i} style={{ display: "grid", gridTemplateColumns: "60px 1fr 28px", gap: 5, marginBottom: 5 }}>
+                          <input type="number" value={phase.years} min={1} onChange={e => updatePhase(i, "years", parseInt(e.target.value) || 1)}
+                            style={{ background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 6, padding: "6px 8px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", width: "100%" }} />
+                          <div style={{ position: "relative" }}>
+                            <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", color: "#6b7280", fontSize: 12 }}>$</span>
+                            <input type="number" value={phase.amount} min={0} onChange={e => updatePhase(i, "amount", parseFloat(e.target.value) || 0)}
+                              style={{ background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 6, padding: "6px 8px 6px 18px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", width: "100%", boxSizing: "border-box" }} />
+                          </div>
+                          <button onClick={() => removePhase(i)} style={{ background: "transparent", border: "1px solid #1c1f2b", borderRadius: 6, color: "#f87171", cursor: "pointer", fontSize: 12 }}>×</button>
+                        </div>
+                      ))}
+                      <button onClick={addPhase} style={{ width: "100%", padding: "6px", background: "transparent", border: "1px dashed #1c1f2b", borderRadius: 6, color: "#4f8ef7", fontSize: 10, cursor: "pointer", marginTop: 2 }}>+ Add Phase</button>
+                      <div style={{ marginTop: 8, fontSize: 10, color: "#374151" }}>
+                        Total: {k.phases.reduce((s, p) => s + p.years, 0)} years covered
+                        · Avg: {fmt(k.phases.reduce((s, p) => s + p.amount * p.years, 0) / Math.max(1, k.phases.reduce((s, p) => s + p.years, 0)))}/mo
+                      </div>
+                    </div>
+                  )}
+                  {/* College costs */}
+                  <div style={{ borderTop: "1px solid #111827", marginTop: 10, paddingTop: 10 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: k.collegeEnabled ? 10 : 0 }}>
+                      <input type="checkbox" checked={k.collegeEnabled ?? false} onChange={e => updateKid("collegeEnabled", e.target.checked)}
+                        style={{ width: 13, height: 13, accentColor: "#a78bfa", cursor: "pointer" }} />
+                      <span style={{ fontSize: 11, fontWeight: 700, color: k.collegeEnabled ? "#a78bfa" : "#4b5563" }}>College / Post-18 Support</span>
+                    </label>
+                    {k.collegeEnabled && (
+                      <div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                          <div>
+                            <label style={{ display: "block", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", marginBottom: 5 }}>Start Age</label>
+                            <input type="number" value={k.collegeStartAge ?? 18} min={18} max={30} step={1}
+                              onChange={e => updateKid("collegeStartAge", parseInt(e.target.value) || 18)}
+                              style={{ width: "100%", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, padding: "7px 9px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", boxSizing: "border-box" }} />
+                          </div>
+                          <div>
+                            <label style={{ display: "block", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", marginBottom: 5 }}>Duration (yrs)</label>
+                            <input type="number" value={k.collegeYears ?? 4} min={1} max={10} step={1}
+                              onChange={e => updateKid("collegeYears", parseInt(e.target.value) || 4)}
+                              style={{ width: "100%", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, padding: "7px 9px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", boxSizing: "border-box" }} />
+                          </div>
+                        </div>
+                        <div style={{ marginTop: 8 }}>
+                          <label style={{ display: "block", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", marginBottom: 5 }}>Annual Cost (today's $)</label>
+                          <div style={{ position: "relative" }}>
+                            <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "#6b7280", fontSize: 12 }}>$</span>
+                            <input type="number" value={k.collegeAnnualAmount ?? 30000} min={0} step={1000}
+                              onChange={e => updateKid("collegeAnnualAmount", parseFloat(e.target.value) || 0)}
+                              style={{ width: "100%", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, padding: "7px 9px 7px 22px", color: "#e8eaf0", fontSize: 12, fontFamily: "monospace", outline: "none", boxSizing: "border-box" }} />
+                          </div>
+                        </div>
+                        <div style={{ marginTop: 8, fontSize: 10, color: "#374151" }}>
+                          Ages {k.collegeStartAge ?? 18}–{(k.collegeStartAge ?? 18) + (k.collegeYears ?? 4)} · Total: {fmt((k.collegeAnnualAmount ?? 30000) * (k.collegeYears ?? 4))} in today's dollars
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+              <div style={{ flex: 1 }}>
+                <Input label="Born in year #" value={newKidYear} onChange={setNewKidYear} min={0} step={1} />
+              </div>
+              <button onClick={addKid} style={{
+                padding: "9px 14px", background: "rgba(79,142,247,0.1)", border: "1px solid #4f8ef7",
+                borderRadius: 7, color: "#4f8ef7", fontSize: 11, fontWeight: 700, cursor: "pointer", marginBottom: 13, whiteSpace: "nowrap",
+              }}>+ Add</button>
+            </div>
+          </Section>
+
+          <Section title="Planned Relocations" icon="🗺️"
+            info={{sections:[
+              {heading:"What changes on move",body:"State income tax rate updates immediately. Rent re-indexes proportionally to the COL ratio between old and new ZIP. Child costs re-index to new COL."},
+              {heading:"Limitations",body:"COL multipliers are ZIP-prefix approximations based on metro-level data. Does not model moving costs, housing market timing, or local vs state tax differences."},
+            ]}}>
+            <p style={{ fontSize: 11, color: "#374151", margin: "0 0 10px", lineHeight: 1.6 }}>
+              Rent and child costs re-index to the new ZIP's cost of living. State tax updates immediately.
+            </p>
+            {zipMoves.length === 0 && (
+              <div style={{ fontSize: 10, color: "#374151", marginBottom: 10 }}>No moves planned.</div>
+            )}
+            {zipMoves.sort((a,b) => a.year - b.year).map(mv => (
+              <div key={mv.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 7, padding: "8px 11px", marginBottom: 6 }}>
+                <div>
+                  <span style={{ fontSize: 12, fontFamily: "monospace", color: "#e8eaf0" }}>Year {mv.year} → {mv.zip}</span>
+                  <span style={{ fontSize: 10, color: "#374151", marginLeft: 8 }}>
+                    COL {COL_MULTIPLIER_BY_ZIP(mv.zip).toFixed(2)}× · {(STATE_TAX_BY_ZIP(mv.zip)*100).toFixed(1)}% state tax
+                  </span>
+                </div>
+                <button onClick={() => removeMove(mv.id)} style={{ background: "transparent", border: "none", color: "#f87171", cursor: "pointer", fontSize: 15 }}>×</button>
+              </div>
+            ))}
+            <div style={{ display: "grid", gridTemplateColumns: "80px 1fr auto", gap: 6, alignItems: "flex-end" }}>
+              <div>
+                <label style={{ display: "block", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", marginBottom: 5 }}>Year</label>
+                <input type="number" value={newMoveYear} onChange={e => setNewMoveYear(parseInt(e.target.value) || 1)} min={1}
+                  style={{ width: "100%", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 7, padding: "9px 8px", color: "#e8eaf0", fontSize: 13, fontFamily: "monospace", outline: "none", boxSizing: "border-box" }}
+                  onFocus={e => e.target.style.borderColor="#4f8ef7"} onBlur={e => e.target.style.borderColor="#1c1f2b"} />
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", marginBottom: 5 }}>New ZIP</label>
+                <input type="text" value={newMoveZip} onChange={e => setNewMoveZip(e.target.value)} placeholder="e.g. 90210" maxLength={5}
+                  style={{ width: "100%", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 7, padding: "9px 10px", color: "#e8eaf0", fontSize: 13, fontFamily: "monospace", outline: "none", boxSizing: "border-box" }}
+                  onFocus={e => e.target.style.borderColor="#4f8ef7"} onBlur={e => e.target.style.borderColor="#1c1f2b"}
+                  onKeyDown={e => e.key === "Enter" && addMove()} />
+              </div>
+              <button onClick={addMove} disabled={newMoveZip.length < 5}
+                style={{ padding: "9px 12px", background: newMoveZip.length >= 5 ? "rgba(79,142,247,0.1)" : "transparent", border: "1px solid", borderColor: newMoveZip.length >= 5 ? "#4f8ef7" : "#1c1f2b", borderRadius: 7, color: newMoveZip.length >= 5 ? "#4f8ef7" : "#374151", fontSize: 11, fontWeight: 700, cursor: newMoveZip.length >= 5 ? "pointer" : "default", whiteSpace: "nowrap" }}>
+                + Add
+              </button>
+            </div>
+          </Section>
+
+
+        </div>
+
+        {/* ── Right panel ── */}
+        <div>
+
+          {/* Stat cards */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 16 }}>
+            {[
+              { label: `Nominal in ${projYears}y`, value: fmt(final.netWorthNominal), sub: "today's dollars × inflation", color: "#4f8ef7" },
+              { label: `Real in ${projYears}y`, value: fmt(final.netWorthReal), sub: "in today's purchasing power", color: "#34d399" },
+              { label: "Inflation Erosion", value: fmt(final.netWorthNominal - final.netWorthReal), sub: `${((1 - final.netWorthReal / Math.max(1, final.netWorthNominal)) * 100).toFixed(0)}% of nominal lost`, color: "#f87171" },
+            ].map(c => (
+              <div key={c.label} style={{ background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 12, padding: "15px 16px" }}>
+                <div style={{ fontSize: 9, color: "#374151", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 5 }}>{c.label}</div>
+                <div style={{ fontSize: 22, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 600, color: c.color, marginBottom: 3 }}>{c.value}</div>
+                <div style={{ fontSize: 10, color: "#1f2937" }}>{c.sub}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Main chart */}
+          <div style={{ background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 14, padding: "18px", marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 8 }}>
+              <div style={{ display: "flex", gap: 6 }}>
+                {CHART_TABS.map(t => (
+                  <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
+                    padding: "6px 12px", borderRadius: 6, border: "1px solid",
+                    borderColor: activeTab === t.id ? "#4f8ef7" : "#1c1f2b",
+                    background: activeTab === t.id ? "rgba(79,142,247,0.12)" : "transparent",
+                    color: activeTab === t.id ? "#4f8ef7" : "#4b5563",
+                    fontSize: 11, fontWeight: 700, cursor: "pointer",
+                  }}>{t.label}</button>
+                ))}
+              </div>
+              <div style={{ display: "flex", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, overflow: "hidden" }}>
+                {[["Nominal", "nominal"], ["Real", "real"], ["Both", "both"]].map(([label, val]) => (
+                  <button key={val} onClick={() => setDisplayMode(val)} style={{
+                    padding: "6px 11px", border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700,
+                    background: displayMode === val ? "rgba(79,142,247,0.15)" : "transparent",
+                    color: displayMode === val ? "#4f8ef7" : "#4b5563",
+                  }}>{label}</button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ width: "100%", height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={data} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#111827" />
+                  <XAxis dataKey="year" stroke="#1f2937" tick={{ fill: "#374151", fontSize: 10 }} tickFormatter={v => `Yr ${v}`} />
+                  <YAxis stroke="#1f2937" tick={{ fill: "#374151", fontSize: 10 }} tickFormatter={v => fmt(v)} width={60} domain={yDomain} ticks={yTicks} />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Legend wrapperStyle={{ fontSize: 11, color: "#6b7280" }} />
+                  {/* Uncertainty bands — only on net worth tab */}
+                  {activeTab === "networth" && <Line type="monotone" dataKey="mc_p75" stroke="none" dot={false} legendType="none" strokeWidth={0} activeDot={false} />}
+                  {activeTab === "networth" && <Line type="monotone" dataKey="mc_p90" stroke="none" dot={false} legendType="none" strokeWidth={0} activeDot={false} />}
+                  {activeTab === "networth" && (displayMode === "nominal" || displayMode === "both") && <Line type="monotone" dataKey="netWorthNominal" name="Total Net Worth" stroke="#4f8ef7" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />}
+                  {activeTab === "networth" && (displayMode === "real" || displayMode === "both") && <Line type="monotone" dataKey="netWorthReal" name="Real Total NW (today's $)" stroke="#34d399" strokeWidth={2} dot={false} strokeDasharray="6 3" activeDot={{ r: 4 }} />}
+                  {activeTab === "networth" && home.enabled && (displayMode === "nominal" || displayMode === "both") && <Line type="monotone" dataKey="liquidNW" name="Liquid NW (nominal)" stroke="#a78bfa" strokeWidth={1.5} dot={false} strokeDasharray="4 2" activeDot={{ r: 3 }} />}
+                  {activeTab === "networth" && home.enabled && (displayMode === "real" || displayMode === "both") && <Line type="monotone" dataKey="liquidNWReal" name="Liquid NW (real)" stroke="#a78bfa" strokeWidth={1.5} dot={false} strokeDasharray="4 2" activeDot={{ r: 3 }} />}
+                  {activeTab === "networth" && home.enabled && (displayMode === "nominal" || displayMode === "both") && <Line type="monotone" dataKey="homeEquity" name="Home Equity (nominal)" stroke="#34d399" strokeWidth={1.5} dot={false} activeDot={{ r: 3 }} />}
+                  {activeTab === "networth" && home.enabled && (displayMode === "real" || displayMode === "both") && <Line type="monotone" dataKey="homeEquityReal" name="Home Equity (real)" stroke="#34d399" strokeWidth={1.5} dot={false} activeDot={{ r: 3 }} />}
+                  {activeTab === "salary" && (displayMode === "nominal" || displayMode === "both") && <Line type="monotone" dataKey="combinedSalary" name="Nominal Salary" stroke="#4f8ef7" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />}
+                  {activeTab === "salary" && (displayMode === "real" || displayMode === "both") && <Line type="monotone" dataKey="combinedSalaryReal" name="Real Salary (today's $)" stroke="#34d399" strokeWidth={2} dot={false} strokeDasharray="6 3" activeDot={{ r: 4 }} />}
+                  {activeTab === "expenses" && (displayMode === "nominal" || displayMode === "both") && <Line type="monotone" dataKey="monthlyExpenses" name="Nominal Mo. Expenses" stroke="#fb923c" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />}
+                  {activeTab === "expenses" && (displayMode === "real" || displayMode === "both") && <Line type="monotone" dataKey="monthlyExpensesReal" name="Real Mo. Expenses (today's $)" stroke="#34d399" strokeWidth={2} dot={false} strokeDasharray="6 3" activeDot={{ r: 4 }} />}
+                  {activeTab === "savings" && (displayMode === "nominal" || displayMode === "both") && <Line type="monotone" dataKey="monthlySavings" name="Nominal Mo. Savings" stroke="#a78bfa" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />}
+                  {activeTab === "savings" && (displayMode === "real" || displayMode === "both") && <Line type="monotone" dataKey="monthlySavingsReal" name="Real Mo. Savings" stroke="#34d399" strokeWidth={2} dot={false} strokeDasharray="6 3" activeDot={{ r: 4 }} />}
+                  {activeTab === "savings" && <ReferenceLine y={0} stroke="#374151" strokeDasharray="4 4" />}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+          </div>
+
+
+          {/* FIRE Calculator */}
+          <div style={{ background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 14, padding: "18px", marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563", flex: 1 }}>🔥 FIRE Calculator</h3>
+              <InfoPopup info={{ sections: [
+                { heading: "FIRE", body: "Financial Independence, Retire Early. Based on the 4% rule: a portfolio 25× your annual expenses historically survives 30+ years of withdrawals." },
+                { heading: "Withdrawal tax rate", body: "Gross up spending for taxes on withdrawals. Traditional 401k/IRA withdrawals are taxed as ordinary income. Roth withdrawals are tax-free. Enter a blended effective rate for your situation." },
+                { heading: "BaristaFIRE", body: "Work part-time to cover living expenses — your portfolio only needs to fund the gap between spending and part-time income. Named after Starbucks baristas who get health benefits working part-time." },
+                { heading: "CoastFIRE", body: "The amount you need today so that compound growth alone reaches your FIRE number by retirement age — with zero additional contributions. Uses your real (inflation-adjusted) return rate." },
+                { heading: "How to use", body: "Results are based on your projected real net worth from the main model. Adjust salary, expenses, and return assumptions on the left to see how they affect your FIRE timeline." },
+                { heading: "Limitations", body: "Does not model sequence-of-returns risk, variable spending in retirement, Social Security income, or tax-loss harvesting. The 4% rule is a historical guideline, not a guarantee." },
+              ]}} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              {/* Left: inputs */}
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "#4b5563", marginBottom: 8 }}>Target</div>
+                <div style={{ display: "flex", background: "#080b10", border: "1px solid #1c1f2b", borderRadius: 6, overflow: "hidden", marginBottom: 12 }}>
+                  {[["Annual Spending", "spending"], ["Net Worth", "networth"]].map(([label, val]) => (
+                    <button key={val} onClick={() => updateFire("targetMode", val)} style={{
+                      flex: 1, padding: "7px 8px", border: "none", cursor: "pointer", fontSize: 10, fontWeight: 700,
+                      background: fire.targetMode === val ? "rgba(251,146,60,0.15)" : "transparent",
+                      color: fire.targetMode === val ? "#fb923c" : "#4b5563",
+                    }}>{label}</button>
+                  ))}
+                </div>
+                {fire.targetMode === "spending" ? (
+                  <div>
+                    <Input label="Annual Spending in Retirement (today's $)" value={fire.annualSpending} onChange={v => updateFire("annualSpending", v)} prefix="$" step={5000} />
+                    <Input label="Safe Withdrawal Rate %" value={fire.withdrawalRate} onChange={v => updateFire("withdrawalRate", v)} suffix="%" step={0.1} min={1} max={10} />
+                    <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "10px 12px", marginBottom: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563" }}>Withdrawal Tax Rate</span>
+                        <div style={{ display: "flex", background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 5, overflow: "hidden" }}>
+                          {[["Auto", "auto"], ["Manual", "manual"]].map(([label, val]) => (
+                            <button key={val} onClick={() => updateFire("withdrawalTaxMode", val)} style={{
+                              padding: "3px 10px", border: "none", cursor: "pointer", fontSize: 9, fontWeight: 700,
+                              background: fire.withdrawalTaxMode === val ? "rgba(79,142,247,0.2)" : "transparent",
+                              color: fire.withdrawalTaxMode === val ? "#4f8ef7" : "#4b5563",
+                            }}>{label}</button>
+                          ))}
+                        </div>
+                      </div>
+                      {fire.withdrawalTaxMode === "manual" ? (
+                        <Input label="" value={fire.withdrawalTaxRate} onChange={v => updateFire("withdrawalTaxRate", v)} suffix="%" step={0.5} min={0} max={60} />
+                      ) : (
+                        <div style={{ fontSize: 13, fontFamily: "monospace", color: "#fbbf24", fontWeight: 700 }}>
+                          {fireCalc.displayTaxPct}%
+                          <span style={{ fontSize: 10, color: "#374151", fontWeight: 400, marginLeft: 8 }}>
+                            effective rate on {fmt(fire.annualSpending)} net spend · {zip} state tax
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 10, color: "#374151", marginBottom: 12, lineHeight: 1.6 }}>
+                      {fireCalc.totalPensionIncome > 0 && (
+                        <div style={{ marginBottom: 4 }}>
+                          Pension offsets: <span style={{ color: "#34d399", fontFamily: "monospace" }}>{fmt(Math.round(fireCalc.totalPensionIncome * (1 - fireCalc.taxRate)))}/yr after-tax</span>
+                          <span style={{ color: "#1f2937" }}> ({fmt(fireCalc.totalPensionIncome)}/yr gross) → portfolio covers {fmt(fireCalc.netSpendingAfterPension)}/yr</span>
+                        </div>
+                      )}
+                      Gross withdrawal: <span style={{ color: "#fbbf24", fontFamily: "monospace" }}>{fmt(fireCalc.grossSpending ?? 0)}</span>/yr
+                      <span style={{ color: "#1f2937" }}> (net after {fireCalc.displayTaxPct}% effective tax)</span>
+                      <br />
+                      FIRE number: <span style={{ color: "#fb923c", fontFamily: "monospace", fontWeight: 700 }}>{fmt(fireCalc.targetNW)}</span>
+                      <span style={{ color: "#1f2937", marginLeft: 6 }}>(gross ÷ {fire.withdrawalRate}%)</span>
+                    </div>
+                  </div>
+                ) : (
+                  <Input label="Target Net Worth (today's $)" value={fire.targetNetWorth} onChange={v => updateFire("targetNetWorth", v)} prefix="$" step={100000} />
+                )}
+                <div style={{ height: 1, background: "#111827", margin: "4px 0 12px" }} />
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "#4b5563", marginBottom: 8 }}>CoastFIRE</div>
+                {retirement.enabled ? (
+                  <div style={{ background: "#080b10", border: "1px solid #111827", borderRadius: 7, padding: "9px 12px", fontSize: 11, marginBottom: 13 }}>
+                    <div style={{ color: "#4b5563", marginBottom: 4 }}>Current Age: <span style={{ color: "#fbbf24", fontFamily: "monospace" }}>{currentAge}</span></div>
+                    <div style={{ color: "#4b5563", marginBottom: 4 }}>Retirement Age: <span style={{ color: "#fbbf24", fontFamily: "monospace" }}>{retirement.retireAge}</span></div>
+                    <div style={{ fontSize: 10, color: "#374151" }}>From Model Retirement · edit there to change</div>
+                  </div>
+                ) : (
+                  <>
+                    <Input label="Target Retirement Age" value={fire.coastRetireAge} onChange={v => updateFire("coastRetireAge", v)} step={1} min={currentAge + 1} max={80} />
+                  </>
+                )}
+                <div style={{ height: 1, background: "#111827", margin: "4px 0 12px" }} />
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "#4b5563", marginBottom: 8 }}>BaristaFIRE</div>
+                <Input label="Part-time Annual Income (today's $)" value={fire.baristaIncome} onChange={v => updateFire("baristaIncome", v)} prefix="$" step={1000} />
+                {fire.targetMode === "spending" && (
+                  <div style={{ fontSize: 10, color: "#374151", marginBottom: 4 }}>
+                    Portfolio gap: <span style={{ color: "#a78bfa", fontFamily: "monospace" }}>{fmt(fireCalc.baristaGapSpending ?? 0)}</span>/yr
+                    <span style={{ color: "#1f2937" }}> (spending − part-time income)</span>
+                  </div>
+                )}
+              </div>
+              {/* Right: results */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {/* FIRE result */}
+                <div style={{ background: "#080b10", border: `1px solid ${fireCalc.alreadyFIRE ? "#fb923c" : "#1c1f2b"}`, borderRadius: 10, padding: "14px" }}>
+                  <div style={{ fontSize: 9, color: "#374151", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>FIRE</div>
+                  {fireCalc.alreadyFIRE ? (
+                    <div style={{ color: "#fb923c", fontFamily: "monospace", fontWeight: 700, fontSize: 15 }}>Already there! 🎉</div>
+                  ) : fireCalc.yearsToFire !== null ? (
+                    <>
+                      <div style={{ fontSize: 22, fontFamily: "monospace", fontWeight: 700, color: "#fb923c" }}>Year {fireCalc.yearsToFire}</div>
+                      <div style={{ fontSize: 11, color: "#6b7280", marginTop: 3 }}>
+                        Age {currentAge + fireCalc.yearsToFire} · {fmt(fireCalc.targetNW)} target
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 13, color: "#f87171", fontFamily: "monospace" }}>Not within 50yr horizon</div>
+                      <div style={{ fontSize: 10, color: "#374151", marginTop: 3 }}>Extend horizon or adjust assumptions</div>
+                    </>
+                  )}
+                </div>
+                {/* CoastFIRE result */}
+                <div style={{ background: "#080b10", border: `1px solid ${fireCalc.alreadyCoast ? "#34d399" : "#1c1f2b"}`, borderRadius: 10, padding: "14px" }}>
+                  <div style={{ fontSize: 9, color: "#374151", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>CoastFIRE</div>
+                  {fireCalc.alreadyCoast ? (
+                    <div style={{ color: "#34d399", fontFamily: "monospace", fontWeight: 700, fontSize: 15 }}>Already coasting! 🏄</div>
+                  ) : fireCalc.yearsToCoast !== null ? (
+                    <>
+                      <div style={{ fontSize: 22, fontFamily: "monospace", fontWeight: 700, color: "#34d399" }}>Year {fireCalc.yearsToCoast}</div>
+                      <div style={{ fontSize: 11, color: "#6b7280", marginTop: 3 }}>
+                        Age {currentAge + fireCalc.yearsToCoast} · coast target {fmt(fireCalc.coastTarget)}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 13, color: "#f87171", fontFamily: "monospace" }}>Not within 50yr horizon</div>
+                      <div style={{ fontSize: 10, color: "#374151", marginTop: 3 }}>Extend horizon or adjust assumptions</div>
+                    </>
+                  )}
+                  <div style={{ marginTop: 8, fontSize: 10, color: "#374151", lineHeight: 1.5 }}>
+                    Need <span style={{ color: "#34d399", fontFamily: "monospace" }}>{fmt(fireCalc.coastTarget)}</span> today to coast to {fmt(fireCalc.targetNW)} by age {fireCalc.effectiveRetireAge}
+                    <span style={{ marginLeft: 6 }}>({fireCalc.yearsToRetire}yr · {(fireCalc.realReturnDecimal * 100).toFixed(1)}% real return)</span>
+                  </div>
+                </div>
+                {/* BaristaFIRE result */}
+                <div style={{ background: "#080b10", border: `1px solid ${fireCalc.yearsToBaristaFire === 0 ? "#a78bfa" : "#1c1f2b"}`, borderRadius: 10, padding: "14px" }}>
+                  <div style={{ fontSize: 9, color: "#374151", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6 }}>BaristaFIRE</div>
+                  {fireCalc.yearsToBaristaFire === 0 ? (
+                    <div style={{ color: "#a78bfa", fontFamily: "monospace", fontWeight: 700, fontSize: 15 }}>Already there! ☕</div>
+                  ) : fireCalc.yearsToBaristaFire !== null ? (
+                    <>
+                      <div style={{ fontSize: 22, fontFamily: "monospace", fontWeight: 700, color: "#a78bfa" }}>Year {fireCalc.yearsToBaristaFire}</div>
+                      <div style={{ fontSize: 11, color: "#6b7280", marginTop: 3 }}>
+                        Age {currentAge + fireCalc.yearsToBaristaFire} · {fmt(fireCalc.baristaTargetNW)} portfolio target
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 13, color: "#f87171", fontFamily: "monospace" }}>Not within 50yr horizon</div>
+                      <div style={{ fontSize: 10, color: "#374151", marginTop: 3 }}>Extend horizon or adjust assumptions</div>
+                    </>
+                  )}
+                  <div style={{ marginTop: 8, fontSize: 10, color: "#374151", lineHeight: 1.5 }}>
+                    Need {fmt(fireCalc.baristaTargetNW ?? 0)} — {fmt(fire.baristaIncome)}/yr part-time covers the rest
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Year-by-year table */}
+          <div style={{ background: "#0d1117", border: "1px solid #1c1f2b", borderRadius: 14, padding: "18px", overflowX: "auto" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+              <h3 style={{ margin: 0, fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: "#4b5563" }}>Year-by-Year Breakdown</h3>
+              <span style={{ fontSize: 10, color: "#374151" }}>All values in today's dollars (real)</span>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: "'IBM Plex Mono', monospace" }}>
+              <thead>
+                <tr>
+                  {(home.enabled
+                    ? ["Year", "Salary", "Tax Rate", "Mo.Expenses", "Mo.Savings", "Savings Rate", "Liquid NW", "Home Equity", "Total NW"]
+                    : ["Year", "Salary", "Tax Rate", "Mo.Expenses", "Mo.Savings", "Savings Rate", "Net Worth"]
+                  ).map(h => (
+                    <th key={h} style={{ textAlign: "right", padding: "7px 10px", color: "#374151", fontWeight: 700, fontSize: 9, letterSpacing: "0.08em", textTransform: "uppercase", borderBottom: "1px solid #111827" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {data.filter((_, i) => i % (projYears > 20 ? 5 : projYears > 10 ? 2 : 1) === 0).map(row => (
+                  <tr key={row.year} style={{ borderBottom: "1px solid #080b10" }}
+                    onMouseEnter={e => e.currentTarget.style.background = "#0f1117"}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                    <td style={{ textAlign: "right", padding: "8px 10px", color: "#6b7280" }}>{row.year}</td>
+                    <td style={{ textAlign: "right", padding: "8px 10px", color: "#6b7280" }}>{fmt(row.partnerSalary > 0 ? row.combinedSalaryReal : row.salaryReal)}</td>
+                    <td style={{ textAlign: "right", padding: "8px 10px", color: "#6b7280" }}>{row.combinedSalaryReal > 0 ? (row.annualTax / (row.combinedSalaryReal * parseFloat(row.inflationFactor)) * 100).toFixed(1) + "%" : "—"}</td>
+                    <td style={{ textAlign: "right", padding: "8px 10px", color: "#6b7280" }}>{fmt(row.monthlyExpensesReal)}</td>
+                    <td style={{ textAlign: "right", padding: "8px 10px", color: row.monthlySavingsReal >= 0 ? "#34d399" : "#f87171" }}>{fmt(row.monthlySavingsReal)}</td>
+                    <td style={{ textAlign: "right", padding: "8px 10px", color: row.monthlySavingsReal >= 0 ? "#34d399" : "#f87171" }}>{row.monthlyAfterTaxReal > 0 ? (row.monthlySavingsReal / row.monthlyAfterTaxReal * 100).toFixed(1) + "%" : "—"}</td>
+                    {home.enabled ? (
+                      <>
+                        <td style={{ textAlign: "right", padding: "8px 10px", color: "#a78bfa", fontWeight: 600 }}>{fmt(row.liquidNWReal)}</td>
+                        <td style={{ textAlign: "right", padding: "8px 10px", color: "#34d399", fontWeight: 600 }}>{fmt(Math.round(row.homeEquity / parseFloat(row.inflationFactor)))}</td>
+                        <td style={{ textAlign: "right", padding: "8px 10px", color: "#4f8ef7", fontWeight: 600 }}>{fmt(row.netWorthReal)}</td>
+                      </>
+                    ) : (
+                      <td style={{ textAlign: "right", padding: "8px 10px", color: "#4f8ef7", fontWeight: 600 }}>{fmt(row.netWorthReal)}</td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #0d1117", display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, fontWeight: 700, color: "#374151", letterSpacing: "0.05em" }}>DWang</span>
+              <span style={{ fontSize: 10, color: "#1f2937", marginLeft: 10 }}>
+                App updated: <span style={{ color: "#374151" }}>March 2026</span>
+                <span style={{ margin: "0 6px", color: "#1f2937" }}>·</span>
+                Data updated: <span style={{ color: "#374151" }}>2025 tax year · S&P / CPI through 2024</span>
+              </span>
+            </div>
+            <p style={{ fontSize: 10, color: "#1f2937", margin: 0 }}>
+              Projections are illustrative only · Not financial advice · Tax estimates are approximate
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+    try {
+      document.getElementById("loading").style.display = "none";
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<NetWorthCalculator />);
+    } catch(e) {
+      var box = document.getElementById("error-box");
+      box.style.display = "block";
+      box.textContent = "RENDER ERROR: " + e.message + "\n" + e.stack;
+      document.getElementById("loading").style.display = "none";
+    }
+  </script>
+</body>
+</html>
